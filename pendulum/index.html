@@ -54,7 +54,7 @@ const P = {
   ],
 };
 const MAGCOL = ["#2E7DFF", "#FFB300", "#E5195E"];
-const HW0 = 2.13, MIN_HW = HW0 / 100000, MAX_HW = 6;
+const HW0 = 4.8, MIN_HW = HW0 / 100000, MAX_HW = 16;
 
 function makeSettle(P) {
   const MAGS = P.MAGS, SPRING = P.SPRING, HH = P.HH, DT = P.DT;
@@ -149,7 +149,7 @@ function halton(i, b) {
 const pointers = new Map();
 
 const vh = () => view.hw * 0.75;
-const calcMaxSteps = () => Math.min(20000, Math.round(3500 * Math.max(1, 1 + 0.5 * Math.log2(HW0 / view.hw))));
+const calcMaxSteps = () => Math.min(20000, Math.round(3500 * (1 + 0.5 * Math.abs(Math.log2(HW0 / view.hw)))));
 
 function sizeCanvases() {
   const rect = stage.getBoundingClientRect();
@@ -240,14 +240,20 @@ function restart(full) {
   pump();
 }
 
-let idleTimer = 0;
+let idleTimer = 0, hideTraj = false;
 function interact() {
   maxSteps = calcMaxSteps();
   restart(false);
+  hideTraj = true;
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => restart(true), 250);
+  idleTimer = setTimeout(() => {
+    hideTraj = false;
+    restart(true);
+    scheduleOverlay();
+  }, 250);
   const z = HW0 / view.hw;
-  zoomEl.textContent = z >= 1.05 ? "×" + (z >= 100 ? Math.round(z).toLocaleString("en-US") : z >= 10 ? z.toFixed(0) : z.toFixed(1)) : "";
+  zoomEl.textContent = z >= 1.05 ? "×" + (z >= 100 ? Math.round(z).toLocaleString("en-US") : z >= 10 ? z.toFixed(0) : z.toFixed(1))
+    : z <= 0.95 ? "×" + z.toFixed(2) : "";
   scheduleOverlay();
 }
 
@@ -285,7 +291,7 @@ function drawOverlay() {
     octx.lineWidth = 2; octx.strokeStyle = "#fff"; octx.stroke();
   }
   const pt = pinned || hoverPt;
-  if (!pt) return;
+  if (!pt || hideTraj) return;
   const path = [];
   const r = settleMain(pt.x, pt.y, fric, maxSteps, path);
   for (const pass of [["rgba(0,0,0,0.55)", 3.5], ["rgba(255,255,255,0.92)", 1.5]]) {
@@ -298,6 +304,32 @@ function drawOverlay() {
   octx.beginPath(); octx.arc(w2sx(pt.x), w2sy(pt.y), 5, 0, 6.2832);
   octx.fillStyle = "#fff"; octx.fill();
   octx.lineWidth = 2.5; octx.strokeStyle = r.m >= 0 ? MAGCOL[r.m] : "#555"; octx.stroke();
+  if (HW0 / view.hw >= 4) drawInset(path, pt, r);
+}
+function drawInset(path, pt, r) {
+  const iw = 172, ih = 129, ix = cssW - iw - 12, iy = 12;
+  const mx = wx => ix + (wx / (2 * HW0) + 0.5) * iw;
+  const my = wy => iy + (0.5 - wy / (2 * HW0 * 0.75)) * ih;
+  octx.save();
+  octx.beginPath(); octx.roundRect(ix, iy, iw, ih, 8);
+  octx.fillStyle = "rgba(16, 16, 20, 0.85)"; octx.fill();
+  octx.strokeStyle = "rgba(255, 255, 255, 0.3)"; octx.lineWidth = 1; octx.stroke();
+  octx.clip();
+  for (let m = 0; m < 3; m++) {
+    octx.beginPath(); octx.arc(mx(P.MAGS[m][0]), my(P.MAGS[m][1]), 3, 0, 6.2832);
+    octx.fillStyle = MAGCOL[m]; octx.fill();
+  }
+  octx.beginPath();
+  octx.moveTo(mx(path[0]), my(path[1]));
+  for (let i = 2; i < path.length; i += 2) octx.lineTo(mx(path[i]), my(path[i + 1]));
+  octx.strokeStyle = "rgba(255, 255, 255, 0.9)"; octx.lineWidth = 1; octx.lineJoin = "round";
+  octx.stroke();
+  octx.beginPath(); octx.arc(mx(pt.x), my(pt.y), 2.5, 0, 6.2832);
+  octx.fillStyle = r.m >= 0 ? MAGCOL[r.m] : "#fff"; octx.fill();
+  const vw = Math.max(3, view.hw / HW0 * iw), vhh = Math.max(3, view.hw * 0.75 / (HW0 * 0.75) * ih);
+  octx.strokeStyle = "rgba(255, 255, 255, 0.6)"; octx.lineWidth = 1;
+  octx.strokeRect(mx(view.cx) - vw / 2, my(view.cy) - vhh / 2, vw, vhh);
+  octx.restore();
 }
 
 function rebaseline() {
