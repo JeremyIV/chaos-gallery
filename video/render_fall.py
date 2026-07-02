@@ -28,13 +28,13 @@ W_OUT, H_OUT = (270, 480) if TEST else (1080, 1920)
 FPS = 30 if TEST else 60
 HOLD_S = 0.5 if TEST else 1.0
 MOTION_S = 2.5 if TEST else 19.0
-SS = 1.5
-STEPS_PER_FRAME = 12 if TEST else 3
+SS = 2.0
+STEPS_PER_FRAME = 12 if TEST else 2
 
 HWX = 4.8
 HWY = HWX * H_OUT / W_OUT
-HW_END = 1.9
-ZOOM_DONE = 0.8
+HW_MID, HW_END = 2.0, 1.4
+ZOOM_SPLIT = 0.6
 DT, SPRING, HH, FRIC = 0.02, 0.5, 0.1225, 0.15
 MAGS = [(0.0, 1.0), (-0.866, -0.5), (0.866, -0.5)]
 COLORS = [(46, 125, 255), (255, 179, 0), (229, 25, 94)]
@@ -111,7 +111,6 @@ def splat(xn, yn, col, hw):
     iy0 = np.floor(sy).astype(np.int64)
     fx = (sx - ix0).astype(np.float32)
     fy = (sy - iy0).astype(np.float32)
-    accw = np.zeros(H_OUT * W_OUT, dtype=np.float64)
     accc = [np.zeros(H_OUT * W_OUT, dtype=np.float64) for _ in range(3)]
     for ox, oy, w in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)),
                       (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
@@ -119,16 +118,12 @@ def splat(xn, yn, col, hw):
         ok = (gx >= 0) & (gx < W_OUT) & (gy >= 0) & (gy < H_OUT)
         idx = (gy[ok] * W_OUT + gx[ok])
         wo = w[ok].astype(np.float64)
-        accw += np.bincount(idx, weights=wo, minlength=H_OUT * W_OUT)
         for c in range(3):
             accc[c] += np.bincount(idx, weights=wo * col[ok, c], minlength=H_OUT * W_OUT)
-    alpha = np.clip(accw, 0.0, 1.0)
-    safe = np.maximum(accw, 1e-9)
-    glow = 1.0 + 0.18 * np.log10(np.clip(accw, 1.0, 1000.0))
+    energy = 1.0 / (SS * SS)
     frame = np.empty((H_OUT * W_OUT, 3), dtype=np.float32)
     for c in range(3):
-        avg = accc[c] / safe
-        frame[:, c] = BG[c] * (1.0 - alpha) + avg * alpha * glow
+        frame[:, c] = BG[c] + accc[c] * energy
     return np.clip(frame, 0, 255).astype(np.uint8).reshape(H_OUT, W_OUT, 3)
 
 
@@ -152,9 +147,15 @@ def main():
     for f in range(motion_frames):
         for _ in range(STEPS_PER_FRAME):
             x, y, vx, vy = step(x, y, vx, vy)
-        u = min(1.0, (f + 1) / (ZOOM_DONE * motion_frames))
-        s = u * u * (3 - 2 * u)
-        hw = HWX * (HW_END / HWX) ** s
+        u = (f + 1) / motion_frames
+        if u < ZOOM_SPLIT:
+            s = u / ZOOM_SPLIT
+            s = s * s * (3 - 2 * s)
+            hw = HWX * (HW_MID / HWX) ** s
+        else:
+            s = (u - ZOOM_SPLIT) / (1 - ZOOM_SPLIT)
+            s = s * s * (3 - 2 * s)
+            hw = HW_MID * (HW_END / HW_MID) ** s
         ff.stdin.write(splat(x.cpu().numpy(), y.cpu().numpy(), col, hw).tobytes())
         if f % 60 == 59:
             el = time.time() - t0
