@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Chaos gallery</title>
 <meta name="description" content="Interactive chaos and fractal demos: every pixel is an initial condition, colored by its fate.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='9' r='6' fill='%237F77DD'/><circle cx='9' cy='21' r='6' fill='%231D9E75'/><circle cx='23' cy='21' r='6' fill='%23D85A30'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='9' r='6' fill='%232E7DFF'/><circle cx='9' cy='21' r='6' fill='%23FFB300'/><circle cx='23' cy='21' r='6' fill='%23E5195E'/></svg>">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -38,7 +38,7 @@ const DEMOS = [
   { id: "plinko", title: "Plinko fractal", src: "plinko/",
     blurb: "Every pixel is a drop point, colored by where the ball finally lands. Scroll to zoom (up to 100,000×) — the basin boundaries are fractal. Hover to trace a trajectory." },
   { id: "pendulum", title: "Magnetic pendulum", src: "pendulum/",
-    blurb: "Every pixel is a release point, colored by which of three magnets captures the pendulum; brightness is time to capture. Scroll to zoom, drag to pan, hover to trace, click to pin." },
+    blurb: "Every pixel is a release point, colored by which of three magnets captures the pendulum. Scroll to zoom, drag to pan, hover to trace, click to pin — and try shading by capture time." },
 ];
 const tabs = document.getElementById("tabs");
 const blurb = document.getElementById("blurb");
