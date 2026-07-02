@@ -12,12 +12,8 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: #101014; color: #e8e8ee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
   main { width: min(960px, 100%); padding: 16px; }
-  h1 { font-size: 20px; font-weight: 600; margin: 4px 0 6px; }
-  .lede { font-size: 14px; color: #9a9aa8; line-height: 1.55; margin: 0 0 12px; max-width: 78ch; }
-  .lede b { color: #c8c8d4; font-weight: 600; }
   #stage { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: #17171c; touch-action: none; }
   #basin, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
-  #basin { image-rendering: pixelated; }
   #overlay { cursor: crosshair; }
   #controls { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; font-size: 14px; }
   label { color: #9a9aa8; }
@@ -27,15 +23,11 @@
   button { background: #22222b; color: #e8e8ee; border: 1px solid #3a3a46; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; }
   button:hover { background: #2a2a35; }
   #zoom { color: #9a9aa8; font-variant-numeric: tabular-nums; }
-  #status { color: #7c7c8a; font-size: 13px; min-width: 100px; text-align: right; margin-left: auto; font-variant-numeric: tabular-nums; }
-  footer { font-size: 13px; color: #7c7c8a; line-height: 1.6; margin-top: 14px; max-width: 78ch; }
-  footer a { color: #9a9aa8; }
+  #status { color: #7c7c8a; font-size: 13px; min-width: 120px; text-align: right; margin-left: auto; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Magnetic pendulum</h1>
-  <p class="lede">A pendulum swings over three magnets — a spring pull toward the center, a little friction, inverse-square attraction to each magnet. Every pixel is a release point, colored by the magnet that finally captures the pendulum. The system is fully deterministic, but near a basin boundary the outcome flips with arbitrarily small changes in the release point, so the boundary is fractal. <b>Scroll</b> to zoom, <b>drag</b> to pan, <b>hover</b> to trace a trajectory, <b>click</b> to pin it.</p>
   <div id="stage">
     <canvas id="basin"></canvas>
     <canvas id="overlay"></canvas>
@@ -49,7 +41,6 @@
     <span id="zoom"></span>
     <span id="status"></span>
   </div>
-  <footer>Rendered progressively across Web Workers, one full simulation per pixel. "Shade by capture time" steps each basin through discrete lightness bands — light means the pendulum settles quickly, and each darker band is a contour of longer wandering, so the darkest filigree hugs the boundary saddles. The integrator is fixed-step symplectic Euler, so at extreme zoom you are looking at the basin structure of that discrete map rather than of the exact continuous flow. Companion piece to the <a href="../#plinko" target="_top">plinko fractal</a> — same question, different machine. Part of the <a href="../" target="_top">chaos gallery</a> · <a href="https://github.com/JeremyIV/chaos-gallery" target="_top">source</a></footer>
 </main>
 <script>
 "use strict";
@@ -119,8 +110,8 @@ onmessage = e => {
   const twoHW = 2 * d.view.hw, twoHH = 2 * d.view.hh;
   for (let y = d.y0; y < d.y1; y += stride) {
     for (let x = 0; x < W; x += stride) {
-      const wx = d.view.cx + ((x + 0.5 * stride) / W - 0.5) * twoHW;
-      const wy = d.view.cy + (0.5 - (y + 0.5 * stride) / d.H) * twoHH;
+      const wx = d.view.cx + ((x + d.jx * stride) / W - 0.5) * twoHW;
+      const wy = d.view.cy + (0.5 - (y + d.jy * stride) / d.H) * twoHH;
       const r = settle(wx, wy, d.fric, d.maxSteps, null);
       const c = r.m < 0 ? [40, 40, 44]
         : d.shade ? LUT[r.m][Math.min(6, Math.floor(Math.sqrt(r.s / d.maxSteps) * 7))]
@@ -147,7 +138,14 @@ let view = { cx: 0, cy: 0, hw: HW0 };
 let fric = 0.15, maxSteps = 3500, shade = false;
 let RW = 480, RH = 360, cssW = 0, cssH = 0;
 let gen = 0, queue = [], chunksTotal = 0, chunksDone = 0, fineApplied = new Uint8Array(0);
+let sums = new Float32Array(0), rowSamples = new Uint16Array(0), coarseChunks = 0, fineChunksPerPass = 0;
 let pinned = null, hoverPt = null, dragInfo = null, pinch = null;
+const AA_SAMPLES = 32;
+function halton(i, b) {
+  let f = 1, r = 0;
+  while (i > 0) { f /= b; r += f * (i % b); i = Math.floor(i / b); }
+  return r;
+}
 const pointers = new Map();
 
 const vh = () => view.hw * 0.75;
@@ -179,9 +177,18 @@ for (let i = 0; i < NW; i++) {
 
 function buildQueue(full) {
   queue = [];
-  for (let y = 0; y < RH; y += 16) queue.push({ y0: y, y1: Math.min(y + 16, RH), stride: 4 });
-  if (full) for (let y = 0; y < RH; y += 8) queue.push({ y0: y, y1: Math.min(y + 8, RH), stride: 1 });
+  for (let y = 0; y < RH; y += 16) queue.push({ y0: y, y1: Math.min(y + 16, RH), stride: 4, jx: 0.5, jy: 0.5 });
+  if (full) {
+    for (let p = 1; p <= AA_SAMPLES; p++) {
+      const jx = p === 1 ? 0.5 : halton(p, 2), jy = p === 1 ? 0.5 : halton(p, 3);
+      for (let y = 0; y < RH; y += 8) queue.push({ y0: y, y1: Math.min(y + 8, RH), stride: 1, jx: jx, jy: jy });
+    }
+    sums = new Float32Array(RW * RH * 3);
+    rowSamples = new Uint16Array(RH);
+  }
   chunksTotal = queue.length; chunksDone = 0;
+  coarseChunks = Math.ceil(RH / 16);
+  fineChunksPerPass = Math.ceil(RH / 8);
   fineApplied = new Uint8Array(RH);
 }
 
@@ -191,7 +198,7 @@ function pump() {
       const job = queue.shift();
       w.idle = false;
       w.postMessage({
-        gen: gen, y0: job.y0, y1: job.y1, stride: job.stride, W: RW, H: RH,
+        gen: gen, y0: job.y0, y1: job.y1, stride: job.stride, jx: job.jx, jy: job.jy, W: RW, H: RH,
         view: { cx: view.cx, cy: view.cy, hw: view.hw, hh: vh() },
         fric: fric, maxSteps: maxSteps, shade: shade,
       });
@@ -202,15 +209,29 @@ function pump() {
 function handleResult(d) {
   if (d.gen !== gen) return;
   chunksDone++;
-  let apply = true;
   if (d.stride !== 1) {
+    let apply = true;
     for (let y = d.y0; y < d.y0 + d.h; y++) if (fineApplied[y]) { apply = false; break; }
+    if (apply) bctx.putImageData(new ImageData(new Uint8ClampedArray(d.buf), RW, d.h), 0, d.y0);
   } else {
-    for (let y = d.y0; y < d.y0 + d.h; y++) fineApplied[y] = 1;
+    const buf = new Uint8ClampedArray(d.buf);
+    const out = new Uint8ClampedArray(RW * d.h * 4);
+    for (let y = d.y0; y < d.y0 + d.h; y++) {
+      fineApplied[y] = 1;
+      const n = ++rowSamples[y];
+      for (let x = 0; x < RW; x++) {
+        const bi = ((y - d.y0) * RW + x) * 4, si = (y * RW + x) * 3;
+        sums[si] += buf[bi]; sums[si + 1] += buf[bi + 1]; sums[si + 2] += buf[bi + 2];
+        out[bi] = sums[si] / n; out[bi + 1] = sums[si + 1] / n; out[bi + 2] = sums[si + 2] / n;
+        out[bi + 3] = 255;
+      }
+    }
+    bctx.putImageData(new ImageData(out, RW, d.h), 0, d.y0);
   }
-  if (apply) bctx.putImageData(new ImageData(new Uint8ClampedArray(d.buf), RW, d.h), 0, d.y0);
-  statusEl.textContent = chunksDone < chunksTotal
-    ? "rendering " + Math.round(100 * chunksDone / chunksTotal) + "%" : "";
+  const renderChunks = coarseChunks + fineChunksPerPass;
+  statusEl.textContent = chunksDone >= chunksTotal ? ""
+    : chunksDone < renderChunks ? "rendering " + Math.round(100 * chunksDone / renderChunks) + "%"
+    : "anti-aliasing " + Math.min(AA_SAMPLES, 1 + Math.floor((chunksDone - coarseChunks) / fineChunksPerPass)) + "/" + AA_SAMPLES;
 }
 
 function restart(full) {

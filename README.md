@@ -17,8 +17,8 @@ fractal, and you can zoom in more or less forever.
 - **[Magnetic pendulum](https://jeremyiv.github.io/chaos-gallery/#pendulum)** — every pixel
   is a release point of a damped pendulum over three magnets, colored by which magnet
   captures it, with optional contour-band shading by capture time. One full simulation per
-  pixel, rendered progressively across Web Workers. Scroll to zoom, drag to pan, hover to
-  trace a trajectory, click to pin it.
+  sample, rendered progressively across Web Workers with up to 32 jittered anti-aliasing
+  samples per pixel. Scroll to zoom, drag to pan, hover to trace a trajectory, click to pin it.
 
 ## Adding a demo
 
