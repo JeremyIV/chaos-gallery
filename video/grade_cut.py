@@ -8,9 +8,11 @@ tweaks take minutes.
 
 Usage:
   grade_cut.py MASTER.raw OUT.mp4 SPEC... [--exposure X] [--gamma G]
-               [--crosstalk C] [--bloom-thresh T]
+               [--crosstalk C] [--bloom-thresh T] [--trim-end SECONDS]
 
 SPEC tokens (playback order): fwd | rev | hold0:SECONDS | holdN:SECONDS
+--trim-end drops the last S seconds of the forward master (the near-converged
+tail), shortening fwd, rev, and the frame holdN refers to.
 
 Example (fractal-first cut, softer highlights):
   grade_cut.py m_hdr_master.raw out.mp4 hold0:1 fwd holdN:0.5 rev hold0:2 --exposure 1.6
@@ -26,6 +28,11 @@ from grading import grade
 
 args = sys.argv[1:]
 opts = {}
+trim_end = 0.0
+if "--trim-end" in args:
+    i = args.index("--trim-end")
+    trim_end = float(args[i + 1])
+    del args[i:i + 2]
 for flag, key in (("--exposure", "exposure"), ("--gamma", "gamma"),
                   ("--crosstalk", "crosstalk"), ("--bloom-thresh", "bloom_thresh")):
     if flag in args:
@@ -37,9 +44,11 @@ SPEC = args[2:]
 
 with open(MASTER.rsplit(".", 1)[0] + ".json") as jf:
     meta = json.load(jf)
-W, H, FPS, N = meta["width"], meta["height"], meta["fps"], meta["frames"]
-hdr = np.memmap(MASTER, dtype=np.float16, mode="r", shape=(N, H, W, 3))
-print(f"master: {N} frames {W}x{H}@{FPS}; grade opts: {opts or 'defaults'}", flush=True)
+W, H, FPS, N_ALL = meta["width"], meta["height"], meta["fps"], meta["frames"]
+hdr = np.memmap(MASTER, dtype=np.float16, mode="r", shape=(N_ALL, H, W, 3))
+N = max(2, N_ALL - round(trim_end * FPS))
+print(f"master: {N_ALL} frames {W}x{H}@{FPS}, using first {N} "
+      f"(trim-end {trim_end}s); grade opts: {opts or 'defaults'}", flush=True)
 
 t0 = time.time()
 graded = []
