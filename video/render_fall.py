@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Render the "falling pixels" magnetic-pendulum video.
 
-Frame 1 is the basin fractal exactly as on the site (default zoom, friction
-0.15). Every pixel is then treated as a pendulum released from rest at that
-point and advected along its own trajectory, so the fractal converges onto
-the three magnets.
+Particles seed a circle circumscribing the view (no rectangular border
+artifacts), colored pure R/G/B by capturing magnet, and render as additive
+light. The video opens on the three settled points, plays the collapse in
+reverse (unfurling into the full fractal), holds, then collapses forward —
+first and last frames match, so it loops.
 
 Physics, palette, and view match pendulum/index.html. Simulation runs on a
 supersampled particle grid (torch, MPS if available); frames are splatted
@@ -14,6 +15,7 @@ Usage:
   python3 render_fall.py out.mp4          # full render: 1080x1920, 60 fps, 20 s
   python3 render_fall.py out.mp4 --test   # quick 270x480, 30 fps, 3 s sanity run
 """
+import math
 import subprocess
 import sys
 import time
@@ -26,10 +28,12 @@ OUT = next((a for a in sys.argv[1:] if not a.startswith("-")), "pendulum_fall.mp
 
 W_OUT, H_OUT = (270, 480) if TEST else (1080, 1920)
 FPS = 30 if TEST else 60
-HOLD_S = 0.5 if TEST else 1.0
-MOTION_S = 2.5 if TEST else 19.0
+FWD_S = 2.5 if TEST else 12.5
+HOLD_END_S = 0.3 if TEST else 0.5
+HOLD_FRACTAL_S = 0.4 if TEST else 1.25
+REV_STRIDE = 2
 SS = 2.0
-STEPS_PER_FRAME = 12 if TEST else 2
+STEPS_PER_FRAME = 12 if TEST else 3
 
 HWX = 4.8
 HWY = HWX * H_OUT / W_OUT
@@ -37,21 +41,27 @@ HW_MID, HW_END = 2.0, 1.4
 ZOOM_SPLIT = 0.6
 DT, SPRING, HH, FRIC = 0.02, 0.5, 0.1225, 0.15
 MAGS = [(0.0, 1.0), (-0.866, -0.5), (0.866, -0.5)]
-COLORS = [(46, 125, 255), (255, 179, 0), (229, 25, 94)]
+COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
 GRAY, BG = (40, 40, 44), (16, 16, 20)
-BASIN_MAX_STEPS = 3500
+BASIN_MAX_STEPS = 4500
 
 PW, PH = int(W_OUT * SS), int(H_OUT * SS)
 DEV = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-print(f"device={DEV} particles={PW}x{PH}={PW*PH/1e6:.1f}M out={W_OUT}x{H_OUT}@{FPS} "
-      f"hold={HOLD_S}s motion={MOTION_S}s", flush=True)
+print(f"device={DEV} out={W_OUT}x{H_OUT}@{FPS} forward={FWD_S}s "
+      f"(dots {HOLD_END_S}s / unfurl / fractal {HOLD_FRACTAL_S}s / collapse)", flush=True)
+
+
+R_SEED = math.hypot(HWX, HWY)
 
 
 def grid():
-    u = (torch.arange(PW, dtype=torch.float32, device=DEV) + 0.5) / PW
-    v = (torch.arange(PH, dtype=torch.float32, device=DEV) + 0.5) / PH
-    wy, wx = torch.meshgrid((0.5 - v) * 2 * HWY, (u - 0.5) * 2 * HWX, indexing="ij")
-    return wx.flatten().clone(), wy.flatten().clone()
+    dx = 2 * HWX / PW
+    n = int(round(2 * R_SEED / dx))
+    c = ((torch.arange(n, dtype=torch.float32, device=DEV) + 0.5) / n - 0.5) * 2 * R_SEED
+    wy, wx = torch.meshgrid(-c, c, indexing="ij")
+    wx, wy = wx.flatten(), wy.flatten()
+    keep = wx * wx + wy * wy <= R_SEED * R_SEED
+    return wx[keep].clone(), wy[keep].clone()
 
 
 def step(x, y, vx, vy):
@@ -130,24 +140,16 @@ def splat(xn, yn, col, hw):
 def main():
     col = basin_colors()
     x, y = grid()
+    print(f"particles in circle: {x.numel()/1e6:.1f}M (seed radius {R_SEED:.2f})", flush=True)
     vx = torch.zeros_like(x)
     vy = torch.zeros_like(y)
-    ff = subprocess.Popen(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-         "-s", f"{W_OUT}x{H_OUT}", "-r", str(FPS), "-i", "-",
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium",
-         "-movflags", "+faststart", OUT],
-        stdin=subprocess.PIPE)
-    hold_frames = round(HOLD_S * FPS)
-    motion_frames = round(MOTION_S * FPS)
-    frame0 = splat(x.cpu().numpy(), y.cpu().numpy(), col, HWX)
-    for _ in range(hold_frames):
-        ff.stdin.write(frame0.tobytes())
+    fwd_frames = round(FWD_S * FPS)
+    frames = [splat(x.cpu().numpy(), y.cpu().numpy(), col, HWX)]
     t0 = time.time()
-    for f in range(motion_frames):
+    for f in range(fwd_frames):
         for _ in range(STEPS_PER_FRAME):
             x, y, vx, vy = step(x, y, vx, vy)
-        u = (f + 1) / motion_frames
+        u = (f + 1) / fwd_frames
         if u < ZOOM_SPLIT:
             s = u / ZOOM_SPLIT
             s = s * s * (3 - 2 * s)
@@ -156,15 +158,30 @@ def main():
             s = (u - ZOOM_SPLIT) / (1 - ZOOM_SPLIT)
             s = s * s * (3 - 2 * s)
             hw = HW_MID * (HW_END / HW_MID) ** s
-        ff.stdin.write(splat(x.cpu().numpy(), y.cpu().numpy(), col, hw).tobytes())
+        frames.append(splat(x.cpu().numpy(), y.cpu().numpy(), col, hw))
         if f % 60 == 59:
             el = time.time() - t0
-            print(f"  frame {f+1}/{motion_frames}  {el:.0f}s elapsed, "
-                  f"ETA {el/(f+1)*(motion_frames-f-1):.0f}s", flush=True)
+            print(f"  frame {f+1}/{fwd_frames}  {el:.0f}s elapsed, "
+                  f"ETA {el/(f+1)*(fwd_frames-f-1):.0f}s", flush=True)
+    last = len(frames) - 1
+    rev = list(range(last, -1, -REV_STRIDE))
+    if rev[-1] != 0:
+        rev.append(0)
+    seq = ([last] * round(HOLD_END_S * FPS) + rev
+           + [0] * round(HOLD_FRACTAL_S * FPS) + list(range(len(frames))))
+    ff = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+         "-s", f"{W_OUT}x{H_OUT}", "-r", str(FPS), "-i", "-",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium",
+         "-movflags", "+faststart", OUT],
+        stdin=subprocess.PIPE)
+    for i in seq:
+        ff.stdin.write(frames[i].tobytes())
     ff.stdin.close()
     ff.wait()
-    print(f"wrote {OUT} ({hold_frames + motion_frames} frames, "
-          f"{(hold_frames + motion_frames)/FPS:.1f}s)", flush=True)
+    print(f"wrote {OUT} ({len(seq)} frames, {len(seq)/FPS:.1f}s: "
+          f"dots {HOLD_END_S}s -> unfurl {len(rev)/FPS:.1f}s -> "
+          f"fractal {HOLD_FRACTAL_S}s -> collapse {len(frames)/FPS:.1f}s)", flush=True)
 
 
 if __name__ == "__main__":
