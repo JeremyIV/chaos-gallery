@@ -22,6 +22,7 @@ import time
 
 import numpy as np
 import torch
+from scipy.ndimage import gaussian_filter, zoom
 
 TEST = "--test" in sys.argv
 OUT = next((a for a in sys.argv[1:] if not a.startswith("-")), "pendulum_fall.mp4")
@@ -44,6 +45,9 @@ MAGS = [(0.0, 1.0), (-0.866, -0.5), (0.866, -0.5)]
 COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
 GRAY, BG = (40, 40, 44), (16, 16, 20)
 BASIN_MAX_STEPS = 4500
+CROSSTALK = 0.06
+EXPOSURE = 2.4
+BLOOM_THRESH = 2.0
 
 PW, PH = int(W_OUT * SS), int(H_OUT * SS)
 DEV = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -130,11 +134,18 @@ def splat(xn, yn, col, hw):
         wo = w[ok].astype(np.float64)
         for c in range(3):
             accc[c] += np.bincount(idx, weights=wo * col[ok, c], minlength=H_OUT * W_OUT)
-    energy = 1.0 / (SS * SS)
-    frame = np.empty((H_OUT * W_OUT, 3), dtype=np.float32)
-    for c in range(3):
-        frame[:, c] = BG[c] + accc[c] * energy
-    return np.clip(frame, 0, 255).astype(np.uint8).reshape(H_OUT, W_OUT, 3)
+    energy = 1.0 / (SS * SS * 255.0)
+    acc = np.stack([a.reshape(H_OUT, W_OUT) for a in accc], axis=-1).astype(np.float32) * energy
+    tot = acc.sum(axis=-1, keepdims=True)
+    L = (1.0 - CROSSTALK) * acc + (CROSSTALK / 2.0) * (tot - acc)
+    excess = np.maximum(L - BLOOM_THRESH, 0.0)
+    L = L + 0.5 * gaussian_filter(excess, sigma=(6, 6, 0))
+    wide = gaussian_filter(np.ascontiguousarray(excess[::4, ::4]), sigma=(5, 5, 0))
+    L = L + 0.22 * zoom(wide, (H_OUT / wide.shape[0], W_OUT / wide.shape[1], 1), order=1)
+    t = 1.0 - np.exp(-EXPOSURE * L)
+    bg = np.array(BG, dtype=np.float32)
+    frame = bg + (255.0 - bg) * t
+    return np.clip(frame, 0, 255).astype(np.uint8)
 
 
 def main():
