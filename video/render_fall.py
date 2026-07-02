@@ -31,12 +31,13 @@ OUT = next((a for a in sys.argv[1:] if not a.startswith("-")), "pendulum_fall.mp
 
 W_OUT, H_OUT = (270, 360) if TEST else (1080, 1440)
 FPS = 30 if TEST else 60
-FWD_S = 2.5 if TEST else 27.0
+FWD_S = 2.5 if TEST else 42.0
+ZOOM_S = 2.5 if TEST else 54.0
 HOLD_END_S = 0.3 if TEST else 0.5
 HOLD_FRACTAL_S = 0.4 if TEST else 3.0
 REV_STRIDE = 1
 SS = 2.0
-STEPS_PER_FRAME = 12 if TEST else 2
+STEPS_PER_FRAME = 12 if TEST else 1
 
 HWX = 4.8
 HWY = HWX * H_OUT / W_OUT
@@ -158,7 +159,7 @@ def main():
     for f in range(fwd_frames):
         for _ in range(STEPS_PER_FRAME):
             x, y, vx, vy = step(x, y, vx, vy)
-        u = (f + 1) / fwd_frames
+        u = min(1.0, (f + 1) / round(ZOOM_S * FPS))
         if u < ZOOM_SPLIT:
             s = u / ZOOM_SPLIT
             s = s * s * (3 - 2 * s)
