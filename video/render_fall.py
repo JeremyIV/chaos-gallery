@@ -31,7 +31,7 @@ W_OUT, H_OUT = (270, 480) if TEST else (1080, 1920)
 FPS = 30 if TEST else 60
 FWD_S = 2.5 if TEST else 20.0
 HOLD_END_S = 0.3 if TEST else 0.5
-HOLD_FRACTAL_S = 0.4 if TEST else 1.5
+HOLD_FRACTAL_S = 0.4 if TEST else 3.0
 REV_STRIDE = 1
 SS = 2.0
 STEPS_PER_FRAME = 12 if TEST else 2
@@ -174,6 +174,16 @@ def main():
             el = time.time() - t0
             print(f"  frame {f+1}/{fwd_frames}  {el:.0f}s elapsed, "
                   f"ETA {el/(f+1)*(fwd_frames-f-1):.0f}s", flush=True)
+    master_path = OUT.rsplit(".", 1)[0] + "_master.mkv"
+    mf = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+         "-s", f"{W_OUT}x{H_OUT}", "-r", str(FPS), "-i", "-", "-c:v", "ffv1", master_path],
+        stdin=subprocess.PIPE)
+    for fr in frames:
+        mf.stdin.write(fr.tobytes())
+    mf.stdin.close()
+    mf.wait()
+    print(f"wrote lossless forward master {master_path} ({len(frames)} frames)", flush=True)
     last = len(frames) - 1
     rev = list(range(last, -1, -REV_STRIDE))
     if rev[-1] != 0:
