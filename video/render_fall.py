@@ -28,12 +28,12 @@ OUT = next((a for a in sys.argv[1:] if not a.startswith("-")), "pendulum_fall.mp
 
 W_OUT, H_OUT = (270, 480) if TEST else (1080, 1920)
 FPS = 30 if TEST else 60
-FWD_S = 2.5 if TEST else 12.5
+FWD_S = 2.5 if TEST else 20.0
 HOLD_END_S = 0.3 if TEST else 0.5
-HOLD_FRACTAL_S = 0.4 if TEST else 1.25
-REV_STRIDE = 2
+HOLD_FRACTAL_S = 0.4 if TEST else 1.5
+REV_STRIDE = 1
 SS = 2.0
-STEPS_PER_FRAME = 12 if TEST else 3
+STEPS_PER_FRAME = 12 if TEST else 2
 
 HWX = 4.8
 HWY = HWX * H_OUT / W_OUT
