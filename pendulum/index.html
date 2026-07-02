@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Magnetic pendulum — basin fractal</title>
+<meta name="description" content="A deterministic pendulum over three magnets: every pixel is a release point, colored by which magnet finally captures it. The basin boundaries are fractal — scroll to zoom.">
+<link rel="canonical" href="https://jeremyiv.github.io/chaos-gallery/pendulum/">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='9' r='6' fill='%237F77DD'/><circle cx='9' cy='21' r='6' fill='%231D9E75'/><circle cx='23' cy='21' r='6' fill='%23D85A30'/></svg>">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #101014; color: #e8e8ee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+  main { width: min(960px, 100%); padding: 16px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 4px 0 6px; }
+  .lede { font-size: 14px; color: #9a9aa8; line-height: 1.55; margin: 0 0 12px; max-width: 78ch; }
+  .lede b { color: #c8c8d4; font-weight: 600; }
+  #stage { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: #17171c; touch-action: none; }
+  #basin, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #basin { image-rendering: pixelated; }
+  #overlay { cursor: crosshair; }
+  #controls { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; font-size: 14px; }
+  label { color: #9a9aa8; }
+  input[type=range] { flex: 1; min-width: 140px; accent-color: #7F77DD; }
+  #fricOut { font-variant-numeric: tabular-nums; min-width: 36px; }
+  button { background: #22222b; color: #e8e8ee; border: 1px solid #3a3a46; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  button:hover { background: #2a2a35; }
+  #zoom { color: #9a9aa8; font-variant-numeric: tabular-nums; }
+  #status { color: #7c7c8a; font-size: 13px; min-width: 100px; text-align: right; margin-left: auto; font-variant-numeric: tabular-nums; }
+  footer { font-size: 13px; color: #7c7c8a; line-height: 1.6; margin-top: 14px; max-width: 78ch; }
+  footer a { color: #9a9aa8; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Magnetic pendulum</h1>
+  <p class="lede">A pendulum swings over three magnets — a spring pull toward the center, a little friction, inverse-square attraction to each magnet. Every pixel is a release point, colored by the magnet that finally captures the pendulum; brightness is time to capture. The system is fully deterministic, but near a basin boundary the outcome flips with arbitrarily small changes in the release point, so the boundary is fractal. <b>Scroll</b> to zoom, <b>drag</b> to pan, <b>hover</b> to trace a trajectory, <b>click</b> to pin it.</p>
+  <div id="stage">
+    <canvas id="basin"></canvas>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div id="controls">
+    <label for="fric">Friction</label>
+    <input type="range" id="fric" min="0.06" max="0.45" step="0.01" value="0.15">
+    <span id="fricOut">0.15</span>
+    <button id="reset">Reset view</button>
+    <span id="zoom"></span>
+    <span id="status"></span>
+  </div>
+  <footer>Rendered progressively across Web Workers, one full simulation per pixel. The integrator is fixed-step symplectic Euler, so at extreme zoom you are looking at the basin structure of that discrete map rather than of the exact continuous flow. Companion piece to the <a href="../#plinko" target="_top">plinko fractal</a> — same question, different machine. Part of the <a href="../" target="_top">chaos gallery</a> · <a href="https://github.com/JeremyIV/chaos-gallery" target="_top">source</a></footer>
+</main>
+<script>
+"use strict";
+const P = {
+  MAGS: [[0, 1], [-0.866, -0.5], [0.866, -0.5]],
+  SPRING: 0.5, HH: 0.1225, DT: 0.02,
+  RAMP: [["#CECBF6", "#26215C"], ["#9FE1CB", "#04342C"], ["#F5C4B3", "#4A1B0C"]],
+};
+const MAGCOL = ["#7F77DD", "#1D9E75", "#D85A30"];
+const HW0 = 2.13, MIN_HW = HW0 / 100000, MAX_HW = 6;
+
+function makeSettle(P) {
+  const MAGS = P.MAGS, SPRING = P.SPRING, HH = P.HH, DT = P.DT;
+  return function settle(x, y, fric, maxSteps, path) {
+    let vx = 0, vy = 0, near = -1, cnt = 0;
+    if (path) path.push(x, y);
+    for (let s = 0; s < maxSteps; s++) {
+      let ax = -SPRING * x - fric * vx, ay = -SPRING * y - fric * vy;
+      for (let m = 0; m < 3; m++) {
+        const dx = MAGS[m][0] - x, dy = MAGS[m][1] - y, d2 = dx * dx + dy * dy + HH;
+        const w = 1 / (d2 * Math.sqrt(d2));
+        ax += dx * w; ay += dy * w;
+      }
+      vx += ax * DT; vy += ay * DT; x += vx * DT; y += vy * DT;
+      if (path && s % 4 === 0) path.push(x, y);
+      if (vx * vx + vy * vy < 0.05) {
+        let hit = -1;
+        for (let m = 0; m < 3; m++) {
+          const dx = MAGS[m][0] - x, dy = MAGS[m][1] - y;
+          if (dx * dx + dy * dy < 0.1) { hit = m; break; }
+        }
+        if (hit >= 0 && hit === near) { if (++cnt > 25) return { m: hit, s: s }; }
+        else { near = hit; cnt = 0; }
+      } else { near = -1; cnt = 0; }
+    }
+    return { m: -1, s: maxSteps };
+  };
+}
+
+function makeLUT(P) {
+  const hex = c => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)];
+  return P.RAMP.map(pair => {
+    const A = hex(pair[0]), B = hex(pair[1]), t = [];
+    for (let i = 0; i < 64; i++) {
+      const u = i / 63;
+      t.push([Math.round(A[0] + (B[0] - A[0]) * u), Math.round(A[1] + (B[1] - A[1]) * u), Math.round(A[2] + (B[2] - A[2]) * u)]);
+    }
+    return t;
+  });
+}
+
+const workerSrc = `
+"use strict";
+const makeSettle = ${makeSettle.toString()};
+const makeLUT = ${makeLUT.toString()};
+let settle = null, LUT = null;
+onmessage = e => {
+  const d = e.data;
+  if (d.P) { settle = makeSettle(d.P); LUT = makeLUT(d.P); return; }
+  const W = d.W, h = d.y1 - d.y0, stride = d.stride;
+  const buf = new Uint8ClampedArray(W * h * 4);
+  const twoHW = 2 * d.view.hw, twoHH = 2 * d.view.hh;
+  for (let y = d.y0; y < d.y1; y += stride) {
+    for (let x = 0; x < W; x += stride) {
+      const wx = d.view.cx + ((x + 0.5 * stride) / W - 0.5) * twoHW;
+      const wy = d.view.cy + (0.5 - (y + 0.5 * stride) / d.H) * twoHH;
+      const r = settle(wx, wy, d.fric, d.maxSteps, null);
+      const c = r.m < 0 ? [40, 40, 44]
+        : LUT[r.m][Math.min(63, Math.floor(Math.sqrt(r.s / d.maxSteps) * 63))];
+      const ye = Math.min(y + stride, d.y1), xe = Math.min(x + stride, W);
+      for (let yy = y; yy < ye; yy++) for (let xx = x; xx < xe; xx++) {
+        const o = ((yy - d.y0) * W + xx) * 4;
+        buf[o] = c[0]; buf[o + 1] = c[1]; buf[o + 2] = c[2]; buf[o + 3] = 255;
+      }
+    }
+  }
+  postMessage({ gen: d.gen, y0: d.y0, h: h, stride: stride, buf: buf.buffer }, [buf.buffer]);
+};
+`;
+
+const stage = document.getElementById("stage");
+const basin = document.getElementById("basin"), bctx = basin.getContext("2d");
+const overlay = document.getElementById("overlay"), octx = overlay.getContext("2d");
+const statusEl = document.getElementById("status"), zoomEl = document.getElementById("zoom");
+const slider = document.getElementById("fric"), fricOut = document.getElementById("fricOut");
+const settleMain = makeSettle(P);
+
+let view = { cx: 0, cy: 0, hw: HW0 };
+let fric = 0.15, maxSteps = 3500;
+let RW = 480, RH = 360, cssW = 0, cssH = 0;
+let gen = 0, queue = [], chunksTotal = 0, chunksDone = 0, fineApplied = new Uint8Array(0);
+let pinned = null, hoverPt = null, dragInfo = null, pinch = null;
+const pointers = new Map();
+
+const vh = () => view.hw * 0.75;
+const calcMaxSteps = () => Math.min(20000, Math.round(3500 * Math.max(1, 1 + 0.5 * Math.log2(HW0 / view.hw))));
+
+function sizeCanvases() {
+  const rect = stage.getBoundingClientRect();
+  cssW = rect.width >= 2 ? rect.width : 928;
+  cssH = rect.height >= 2 ? rect.height : cssW * 0.75;
+  RW = Math.max(160, Math.min(480, Math.round(cssW / 2)));
+  RH = Math.round(RW * 0.75);
+  basin.width = RW; basin.height = RH;
+  const dpr = window.devicePixelRatio || 1;
+  overlay.width = Math.round(cssW * dpr); overlay.height = Math.round(cssH * dpr);
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+const NW = Math.min(8, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
+const workers = [];
+const workerUrl = URL.createObjectURL(new Blob([workerSrc], { type: "text/javascript" }));
+for (let i = 0; i < NW; i++) {
+  const w = new Worker(workerUrl);
+  w.postMessage({ P: P });
+  w.idle = true;
+  w.onmessage = e => { w.idle = true; handleResult(e.data); pump(); };
+  w.onerror = err => { console.error("worker error", err.message); };
+  workers.push(w);
+}
+
+function buildQueue(full) {
+  queue = [];
+  for (let y = 0; y < RH; y += 16) queue.push({ y0: y, y1: Math.min(y + 16, RH), stride: 4 });
+  if (full) for (let y = 0; y < RH; y += 8) queue.push({ y0: y, y1: Math.min(y + 8, RH), stride: 1 });
+  chunksTotal = queue.length; chunksDone = 0;
+  fineApplied = new Uint8Array(RH);
+}
+
+function pump() {
+  for (const w of workers) {
+    if (w.idle && queue.length) {
+      const job = queue.shift();
+      w.idle = false;
+      w.postMessage({
+        gen: gen, y0: job.y0, y1: job.y1, stride: job.stride, W: RW, H: RH,
+        view: { cx: view.cx, cy: view.cy, hw: view.hw, hh: vh() },
+        fric: fric, maxSteps: maxSteps,
+      });
+    }
+  }
+}
+
+function handleResult(d) {
+  if (d.gen !== gen) return;
+  chunksDone++;
+  let apply = true;
+  if (d.stride !== 1) {
+    for (let y = d.y0; y < d.y0 + d.h; y++) if (fineApplied[y]) { apply = false; break; }
+  } else {
+    for (let y = d.y0; y < d.y0 + d.h; y++) fineApplied[y] = 1;
+  }
+  if (apply) bctx.putImageData(new ImageData(new Uint8ClampedArray(d.buf), RW, d.h), 0, d.y0);
+  statusEl.textContent = chunksDone < chunksTotal
+    ? "rendering " + Math.round(100 * chunksDone / chunksTotal) + "%" : "";
+}
+
+function restart(full) {
+  gen++;
+  buildQueue(full);
+  pump();
+}
+
+let idleTimer = 0;
+function interact() {
+  maxSteps = calcMaxSteps();
+  restart(false);
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => restart(true), 250);
+  const z = HW0 / view.hw;
+  zoomEl.textContent = z >= 1.05 ? "×" + (z >= 100 ? Math.round(z).toLocaleString("en-US") : z >= 10 ? z.toFixed(0) : z.toFixed(1)) : "";
+  scheduleOverlay();
+}
+
+const w2sx = wx => ((wx - view.cx) / (2 * view.hw) + 0.5) * cssW;
+const w2sy = wy => (0.5 - (wy - view.cy) / (2 * vh())) * cssH;
+function s2w(clientX, clientY) {
+  const rect = overlay.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return { x: view.cx, y: view.cy };
+  return {
+    x: view.cx + ((clientX - rect.left) / rect.width - 0.5) * 2 * view.hw,
+    y: view.cy + (0.5 - (clientY - rect.top) / rect.height) * 2 * vh(),
+  };
+}
+function anchor(w, clientX, clientY) {
+  const rect = overlay.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return;
+  const fx = (clientX - rect.left) / rect.width, fy = (clientY - rect.top) / rect.height;
+  view.cx = w.x - (fx - 0.5) * 2 * view.hw;
+  view.cy = w.y - (0.5 - fy) * 2 * vh();
+}
+
+let overlayReq = 0, lastOverlayDraw = 0;
+function scheduleOverlay() {
+  if (performance.now() - lastOverlayDraw >= 8) drawOverlay();
+  else if (!overlayReq) overlayReq = requestAnimationFrame(() => { overlayReq = 0; drawOverlay(); });
+}
+function drawOverlay() {
+  lastOverlayDraw = performance.now();
+  octx.clearRect(0, 0, cssW, cssH);
+  for (let m = 0; m < 3; m++) {
+    const sx = w2sx(P.MAGS[m][0]), sy = w2sy(P.MAGS[m][1]);
+    if (sx < -20 || sx > cssW + 20 || sy < -20 || sy > cssH + 20) continue;
+    octx.beginPath(); octx.arc(sx, sy, 8, 0, 6.2832);
+    octx.fillStyle = MAGCOL[m]; octx.fill();
+    octx.lineWidth = 2; octx.strokeStyle = "#fff"; octx.stroke();
+  }
+  const pt = pinned || hoverPt;
+  if (!pt) return;
+  const path = [];
+  const r = settleMain(pt.x, pt.y, fric, maxSteps, path);
+  for (const pass of [["rgba(0,0,0,0.55)", 3.5], ["rgba(255,255,255,0.92)", 1.5]]) {
+    octx.beginPath();
+    octx.moveTo(w2sx(path[0]), w2sy(path[1]));
+    for (let i = 2; i < path.length; i += 2) octx.lineTo(w2sx(path[i]), w2sy(path[i + 1]));
+    octx.strokeStyle = pass[0]; octx.lineWidth = pass[1]; octx.lineJoin = "round";
+    octx.stroke();
+  }
+  octx.beginPath(); octx.arc(w2sx(pt.x), w2sy(pt.y), 5, 0, 6.2832);
+  octx.fillStyle = "#fff"; octx.fill();
+  octx.lineWidth = 2.5; octx.strokeStyle = r.m >= 0 ? MAGCOL[r.m] : "#555"; octx.stroke();
+}
+
+function rebaseline() {
+  if (pointers.size < 2) pinch = null;
+  if (pointers.size === 2) {
+    dragInfo = null;
+    const pts = [...pointers.values()];
+    pinch = {
+      d0: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y), hw0: view.hw,
+      wmid: s2w((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2),
+    };
+  } else if (pointers.size === 1 && !dragInfo) {
+    const p = [...pointers.values()][0];
+    dragInfo = { sx: p.x, sy: p.y, cx0: view.cx, cy0: view.cy, moved: true };
+  }
+}
+overlay.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  try { overlay.setPointerCapture(e.pointerId); } catch (err) {}
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1) {
+    dragInfo = { sx: e.clientX, sy: e.clientY, cx0: view.cx, cy0: view.cy, moved: false };
+  } else {
+    rebaseline();
+  }
+});
+overlay.addEventListener("pointermove", e => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pointers.size === 2) {
+    const pts = [...pointers.values()];
+    const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    if (d > 4 && pinch.d0 > 4) {
+      view.hw = Math.min(MAX_HW, Math.max(MIN_HW, pinch.hw0 * pinch.d0 / d));
+      anchor(pinch.wmid, (pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2);
+      interact();
+    }
+  } else if (dragInfo && pointers.size === 1) {
+    const dx = e.clientX - dragInfo.sx, dy = e.clientY - dragInfo.sy;
+    if (Math.abs(dx) + Math.abs(dy) > 4) dragInfo.moved = true;
+    if (dragInfo.moved) {
+      const rect = overlay.getBoundingClientRect();
+      if (rect.width >= 2 && rect.height >= 2) {
+        view.cx = dragInfo.cx0 - dx / rect.width * 2 * view.hw;
+        view.cy = dragInfo.cy0 + dy / rect.height * 2 * vh();
+        interact();
+      }
+    }
+  } else if (pointers.size === 0 && e.pointerType === "mouse" && !pinned) {
+    hoverPt = s2w(e.clientX, e.clientY);
+    scheduleOverlay();
+  }
+});
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  const wasClick = dragInfo && !dragInfo.moved && pointers.size === 0;
+  rebaseline();
+  if (pointers.size === 0) {
+    if (wasClick) {
+      pinned = pinned ? null : s2w(e.clientX, e.clientY);
+      scheduleOverlay();
+    }
+    dragInfo = null;
+  }
+}
+overlay.addEventListener("pointerup", endPointer);
+overlay.addEventListener("pointercancel", e => {
+  pointers.delete(e.pointerId);
+  rebaseline();
+  if (pointers.size === 0) dragInfo = null;
+});
+overlay.addEventListener("pointerleave", () => {
+  if (pointers.size === 0 && !pinned) { hoverPt = null; scheduleOverlay(); }
+});
+stage.addEventListener("wheel", e => {
+  e.preventDefault();
+  const w = s2w(e.clientX, e.clientY);
+  view.hw = Math.min(MAX_HW, Math.max(MIN_HW, view.hw * Math.exp(e.deltaY * 0.0015)));
+  anchor(w, e.clientX, e.clientY);
+  interact();
+}, { passive: false });
+
+slider.addEventListener("input", () => {
+  fric = parseFloat(slider.value);
+  fricOut.textContent = fric.toFixed(2);
+  interact();
+});
+document.getElementById("reset").addEventListener("click", () => {
+  view = { cx: 0, cy: 0, hw: HW0 };
+  pinned = null;
+  interact();
+});
+let resizeTimer = 0;
+function onStageResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const rect = stage.getBoundingClientRect();
+    if (rect.width < 2) return;
+    if (Math.abs(rect.width - cssW) < 1 && Math.abs(rect.height - cssH) < 1) return;
+    sizeCanvases();
+    maxSteps = calcMaxSteps();
+    restart(true);
+    scheduleOverlay();
+  }, 150);
+}
+new ResizeObserver(onStageResize).observe(stage);
+addEventListener("resize", onStageResize);
+
+sizeCanvases();
+maxSteps = calcMaxSteps();
+restart(true);
+scheduleOverlay();
+</script>
+</body>
+</html>

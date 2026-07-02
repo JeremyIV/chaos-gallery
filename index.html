@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chaos gallery</title>
+<meta name="description" content="Interactive chaos and fractal demos: every pixel is an initial condition, colored by its fate.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='9' r='6' fill='%237F77DD'/><circle cx='9' cy='21' r='6' fill='%231D9E75'/><circle cx='23' cy='21' r='6' fill='%23D85A30'/></svg>">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; flex-direction: column; background: #101014; color: #e8e8ee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px 8px; flex-wrap: wrap; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  nav { display: flex; gap: 6px; flex-wrap: wrap; }
+  nav button { background: none; border: 1px solid transparent; color: #9a9aa8; font: inherit; font-size: 14px; padding: 5px 12px; border-radius: 8px; cursor: pointer; }
+  nav button:hover { color: #e8e8ee; border-color: #33333e; }
+  nav button.active { color: #fff; background: #22222b; border-color: #3a3a46; }
+  header .gh { margin-left: auto; color: #9a9aa8; font-size: 13px; text-decoration: none; }
+  header .gh:hover { color: #e8e8ee; }
+  #blurb { font-size: 13px; color: #7c7c8a; margin: 0 16px 10px; }
+  #frames { flex: 1; position: relative; border-top: 1px solid #26262e; }
+  #frames iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Chaos gallery</h1>
+  <nav id="tabs"></nav>
+  <a class="gh" href="https://github.com/JeremyIV/chaos-gallery">GitHub</a>
+</header>
+<p id="blurb" aria-live="polite"></p>
+<div id="frames"></div>
+<script>
+"use strict";
+const DEMOS = [
+  { id: "plinko", title: "Plinko fractal", src: "plinko/",
+    blurb: "Every pixel is a drop point, colored by where the ball finally lands. Scroll to zoom (up to 100,000×) — the basin boundaries are fractal. Hover to trace a trajectory." },
+  { id: "pendulum", title: "Magnetic pendulum", src: "pendulum/",
+    blurb: "Every pixel is a release point, colored by which of three magnets captures the pendulum; brightness is time to capture. Scroll to zoom, drag to pan, hover to trace, click to pin." },
+];
+const tabs = document.getElementById("tabs");
+const blurb = document.getElementById("blurb");
+const frames = document.getElementById("frames");
+const iframes = {};
+for (const d of DEMOS) {
+  const b = document.createElement("button");
+  b.textContent = d.title;
+  b.dataset.id = d.id;
+  b.addEventListener("click", () => { location.hash = d.id; });
+  tabs.appendChild(b);
+}
+function show(id) {
+  const demo = DEMOS.find(d => d.id === id) || DEMOS[0];
+  for (const b of tabs.children) b.classList.toggle("active", b.dataset.id === demo.id);
+  blurb.textContent = demo.blurb;
+  document.title = demo.title + " — chaos gallery";
+  if (!iframes[demo.id]) {
+    const f = document.createElement("iframe");
+    f.src = demo.src;
+    f.title = demo.title;
+    iframes[demo.id] = f;
+    frames.appendChild(f);
+  }
+  for (const k of Object.keys(iframes)) iframes[k].style.display = k === demo.id ? "block" : "none";
+}
+addEventListener("hashchange", () => show(location.hash.slice(1)));
+show(location.hash.slice(1));
+</script>
+</body>
+</html>

@@ -1,0 +1,1822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Plinko Fractal</title>
+    <meta name="description" content="Where does a plinko ball land? An interactive fractal map of plinko outcomes — each pixel is a drop point, colored by where the ball ends up. Zoom in to explore the infinite boundary.">
+    <link rel="canonical" href="https://jeremyiv.github.io/plinko-fractal-2/">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎱</text></svg>">
+
+    <!-- Link preview / social cards -->
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Plinko Fractal">
+    <meta property="og:description" content="Where does a plinko ball land? Each pixel is a drop point, colored by where the ball ends up. Zoom in to explore the infinite boundary.">
+    <meta property="og:url" content="https://jeremyiv.github.io/plinko-fractal-2/">
+    <meta property="og:image" content="https://jeremyiv.github.io/plinko-fractal-2/preview.jpg">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="1114">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Plinko Fractal">
+    <meta name="twitter:description" content="Where does a plinko ball land? Each pixel is a drop point, colored by where the ball ends up. Zoom in to explore the infinite boundary.">
+    <meta name="twitter:image" content="https://jeremyiv.github.io/plinko-fractal-2/preview.jpg">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            overscroll-behavior: none;
+            touch-action: manipulation;
+        }
+        .canvas-container {
+            position: relative;
+            width: calc(100vw - 40px);
+            max-width: 800px;
+            aspect-ratio: 800 / 720;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: 2px solid #444;
+            border-radius: 8px;
+            touch-action: none;
+        }
+        #glCanvas {
+            background: #0f0f1a;
+        }
+        #overlayCanvas {
+            background: transparent;
+            cursor: crosshair;
+        }
+        .info {
+            margin-top: 15px;
+            font-size: 13px;
+            color: #888;
+            text-align: center;
+        }
+        @media (max-width: 600px) {
+            body { padding: 10px; }
+            .canvas-container { width: calc(100vw - 20px); }
+            .info { font-size: 12px; padding: 0 8px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="canvas-container">
+        <canvas id="glCanvas" width="800" height="720"></canvas>
+        <canvas id="overlayCanvas" width="800" height="720"></canvas>
+    </div>
+    <div class="info">
+        <span id="status"></span>
+        Scroll/pinch to zoom. Drag to pan when zoomed. Hover/touch for trajectory preview.
+    </div>
+    <script>
+        // ==================== WebGL Setup ====================
+        const glCanvas = document.getElementById('glCanvas');
+        const gl = glCanvas.getContext('webgl');
+        
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const ctx = overlayCanvas.getContext('2d');
+
+        if (!gl) {
+            alert('WebGL not supported');
+            throw new Error('WebGL not supported');
+        }
+
+        // Physics parameters
+        let damping = 0.5;
+        const gravity = 500.0;
+        let pegRadius = 22.0; // Must be >= 20 (pegSpacingX/4) to prevent straight falls
+
+        // Feature flags
+        const ENABLE_FRACTAL_RENDERING = true;   // Toggle WebGL basin computation
+        const ENABLE_TRAJECTORY_ON_HOVER = true; // Toggle trajectory drawing
+        // Zoom and pan state
+        let zoomLevel = 1.0;
+        const minZoom = 1.0;
+        const maxZoom = 100000.0;
+        let panX = 0.0;  // Pan offset in world coordinates
+        let panY = 0.0;
+        let isPanning = false;
+        let lastPanMouseX = 0;
+        let lastPanMouseY = 0;
+        
+        // Check if we're at default zoom (fully zoomed out)
+        function isFullyZoomedOut() {
+            return zoomLevel <= minZoom + 0.001;
+        }
+
+        // Peg array configuration
+        const pegRows = 5;
+        const pegsPerRow = 10;   // Pegs per row
+        const pegSpacingX = 80;  // Horizontal spacing between pegs (scaled up)
+        const pegSpacingY = 100; // Vertical spacing between rows (scaled up)
+        const pegStartY = 200;   // Y position of first peg row (more space above for drops)
+
+        function generatePegs() {
+            const pegs = [];
+            for (let row = 0; row < pegRows; row++) {
+                const rowOffset = (row % 2) * (pegSpacingX / 2);
+                const rowPegCount = pegsPerRow - (row % 2);
+                const rowStartX = (glCanvas.width - (rowPegCount - 1) * pegSpacingX) / 2 + rowOffset - (row % 2) * (pegSpacingX / 2);
+                for (let col = 0; col < rowPegCount; col++) {
+                    pegs.push({ x: rowStartX + col * pegSpacingX, y: pegStartY + row * pegSpacingY });
+                }
+            }
+            return pegs;
+        }
+
+        const pegs = generatePegs();
+
+        // Simulation boundaries
+        const bucketY = glCanvas.height;  // Bottom of canvas where balls land
+        const bucketStartX = 0;
+        const bucketTotalWidth = glCanvas.width;  // Full width for color mapping
+        const topRegionHeight = glCanvas.height; // Fractal covers entire canvas
+
+        // ==================== Shaders ====================
+        const vertexShaderSource = `
+            attribute vec2 a_position;
+            varying vec2 v_uv;
+            void main() {
+                v_uv = a_position * 0.5 + 0.5;
+                gl_Position = vec4(a_position, 0.0, 1.0);
+            }
+        `;
+
+        // Simulation shader - renders one sample with random dithering
+        const simFragmentShaderSource = `
+            precision highp float;
+            varying vec2 v_uv;
+            
+            uniform float u_damping;
+            uniform float u_pegRadius;
+            uniform float u_gravity;
+            uniform float u_topRegionHeight;
+            uniform float u_bucketY;
+            uniform float u_bucketStartX;
+            uniform float u_bucketTotalWidth;
+            uniform vec3 u_bgColor;
+            uniform float u_seed;
+            uniform vec2 u_resolution;
+            // Hex grid parameters
+            uniform float u_pegSpacingX;
+            uniform float u_pegSpacingY;
+            uniform float u_pegStartY;
+            uniform float u_gridOriginX;
+            uniform int u_pegsPerRow;
+            uniform int u_pegRows;
+            
+            // Zoom and pan uniforms
+            uniform float u_zoom;
+            uniform vec2 u_pan;
+            
+            const int MAX_BOUNCES = 50;
+            const int MAX_PEG_ROWS = 8;
+            const int MAX_PEGS_PER_ROW = 12;
+            const float EPSILON = 0.00001;
+            const float SOLVER_EPS = 0.0000001;
+            const float COLLISION_TMAX = 3.0;
+            const float PI = 3.141592653589793;
+            
+            // Hash function for pseudo-random numbers
+            float hash(vec2 p) {
+                vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+                p3 += dot(p3, p3.yzx + 33.33);
+                return fract((p3.x + p3.y) * p3.z);
+            }
+            
+            vec2 hash2(vec2 p, float seed) {
+                return vec2(
+                    hash(p + vec2(seed, 0.0)),
+                    hash(p + vec2(0.0, seed + 17.31))
+                );
+            }
+            
+            float solveQuadraticMin(float a, float b, float c) {
+                if (abs(a) < 1e-10) {
+                    if (abs(b) < 1e-10) return -1.0;
+                    float t = -c / b;
+                    return t > EPSILON ? t : -1.0;
+                }
+                float disc = b * b - 4.0 * a * c;
+                if (disc < 0.0) return -1.0;
+                float sqrtDisc = sqrt(disc);
+                float t1 = (-b - sqrtDisc) / (2.0 * a);
+                float t2 = (-b + sqrtDisc) / (2.0 * a);
+                if (t1 > EPSILON) return t1;
+                if (t2 > EPSILON) return t2;
+                return -1.0;
+            }
+            
+            float cbrt(float x) {
+                return sign(x) * pow(abs(x), 1.0 / 3.0);
+            }
+            
+            int solveCubicReal(float a, float b, float c, float d, out vec3 roots) {
+                if (abs(a) < SOLVER_EPS) {
+                    if (abs(b) < SOLVER_EPS) {
+                        if (abs(c) < SOLVER_EPS) return 0;
+                        roots = vec3(-d / c, 0.0, 0.0);
+                        return 1;
+                    }
+                    float disc = c * c - 4.0 * b * d;
+                    if (disc < 0.0) return 0;
+                    float s = sqrt(disc);
+                    roots = vec3((-c - s) / (2.0 * b), (-c + s) / (2.0 * b), 0.0);
+                    return disc < SOLVER_EPS ? 1 : 2;
+                }
+                
+                float A = b / a;
+                float B = c / a;
+                float C = d / a;
+                
+                float p = B - A * A / 3.0;
+                float q = 2.0 * A * A * A / 27.0 - A * B / 3.0 + C;
+                float disc = 0.25 * q * q + (p * p * p) / 27.0;
+                
+                if (disc > SOLVER_EPS) {
+                    float sqrtDisc = sqrt(disc);
+                    float u = cbrt(-0.5 * q + sqrtDisc);
+                    float v = cbrt(-0.5 * q - sqrtDisc);
+                    roots = vec3(u + v - A / 3.0, 0.0, 0.0);
+                    return 1;
+                }
+                
+                if (disc >= -SOLVER_EPS) {
+                    float u = cbrt(-0.5 * q);
+                    roots = vec3(2.0 * u - A / 3.0, -u - A / 3.0, -u - A / 3.0);
+                    return 3;
+                }
+                
+                float phi = acos(clamp(-0.5 * q / sqrt(-(p * p * p) / 27.0), -1.0, 1.0));
+                float t = 2.0 * sqrt(-p / 3.0);
+                roots = vec3(
+                    t * cos(phi / 3.0) - A / 3.0,
+                    t * cos((phi + 2.0 * PI) / 3.0) - A / 3.0,
+                    t * cos((phi + 4.0 * PI) / 3.0) - A / 3.0
+                );
+                return 3;
+            }
+            
+            float quarticValue(float a4, float a3, float a2, float a1, float a0, float t) {
+                return (((a4 * t + a3) * t + a2) * t + a1) * t + a0;
+            }
+            
+            float findRootInInterval(float a4, float a3, float a2, float a1, float a0, float lo, float hi) {
+                float fLo = quarticValue(a4, a3, a2, a1, a0, lo);
+                float fHi = quarticValue(a4, a3, a2, a1, a0, hi);
+                
+                if (abs(fLo) < SOLVER_EPS) return lo;
+                if (abs(fHi) < SOLVER_EPS) return hi;
+                if (fLo * fHi > 0.0) return -1.0;
+                
+                float a = lo;
+                float b = hi;
+                float fa = fLo;
+                float fb = fHi;
+                
+                for (int i = 0; i < 24; i++) {
+                    float mid = 0.5 * (a + b);
+                    float fm = quarticValue(a4, a3, a2, a1, a0, mid);
+                    if (abs(fm) < 1e-6) return mid;
+                    if (fa * fm <= 0.0) {
+                        b = mid;
+                        fb = fm;
+                    } else {
+                        a = mid;
+                        fa = fm;
+                    }
+                }
+                return 0.5 * (a + b);
+            }
+            
+            float solveQuarticMinPositive(float a4, float a3, float a2, float a1, float a0) {
+                if (abs(a4) < SOLVER_EPS) return -1.0;
+                
+                vec3 roots;
+                int count = solveCubicReal(4.0 * a4, 3.0 * a3, 2.0 * a2, a1, roots);
+                
+                float r0 = (count > 0) ? roots.x : 1e20;
+                float r1 = (count > 1) ? roots.y : 1e20;
+                float r2 = (count > 2) ? roots.z : 1e20;
+                
+                if (r0 > r1) { float tmp = r0; r0 = r1; r1 = tmp; }
+                if (r1 > r2) { float tmp = r1; r1 = r2; r2 = tmp; }
+                if (r0 > r1) { float tmp = r0; r0 = r1; r1 = tmp; }
+                
+                float minT = 1e20;
+                float tA = 0.0;
+                
+                if (r0 > 0.0 && r0 < COLLISION_TMAX) {
+                    float root = findRootInInterval(a4, a3, a2, a1, a0, tA, r0);
+                    if (root > EPSILON && root < minT) minT = root;
+                    tA = r0;
+                }
+                if (r1 > 0.0 && r1 < COLLISION_TMAX) {
+                    float root = findRootInInterval(a4, a3, a2, a1, a0, tA, r1);
+                    if (root > EPSILON && root < minT) minT = root;
+                    tA = r1;
+                }
+                if (r2 > 0.0 && r2 < COLLISION_TMAX) {
+                    float root = findRootInInterval(a4, a3, a2, a1, a0, tA, r2);
+                    if (root > EPSILON && root < minT) minT = root;
+                    tA = r2;
+                }
+                
+                float root = findRootInInterval(a4, a3, a2, a1, a0, tA, COLLISION_TMAX);
+                if (root > EPSILON && root < minT) minT = root;
+                
+                return (minT > 1e19) ? -1.0 : minT;
+            }
+            
+            vec2 getPosition(vec2 p0, vec2 v0, float t) {
+                return p0 + v0 * t + vec2(0.0, 0.5 * u_gravity * t * t);
+            }
+            
+            vec2 getVelocity(vec2 v0, float t) {
+                return v0 + vec2(0.0, u_gravity * t);
+            }
+            
+            // ==================== Hex Grid Functions ====================
+            
+            // Round fractional hex coordinates to nearest hex
+            vec2 hexRound(float q, float r) {
+                float s = -q - r;
+                float rq = floor(q + 0.5);
+                float rr = floor(r + 0.5);
+                float rs = floor(s + 0.5);
+                
+                float qDiff = abs(rq - q);
+                float rDiff = abs(rr - r);
+                float sDiff = abs(rs - s);
+                
+                if (qDiff > rDiff && qDiff > sDiff) {
+                    rq = -rr - rs;
+                } else if (rDiff > sDiff) {
+                    rr = -rq - rs;
+                }
+                
+                return vec2(rq, rr);
+            }
+            
+            // Convert pixel coordinates to hex grid coordinates
+            vec2 pixelToHex(vec2 pixel) {
+                float x = pixel.x - u_gridOriginX;
+                float y = pixel.y - u_pegStartY;
+                
+                float normX = x / u_pegSpacingX;
+                float normY = y / u_pegSpacingY;
+                
+                float q = normX - 0.5 * normY;
+                float r = normY;
+                
+                return hexRound(q, r);
+            }
+            
+            // Convert hex coordinates to pixel position, returns vec3(x, y, valid)
+            // where valid > 0.5 means the peg exists
+            vec3 hexToPixel(float q, float r) {
+                int row = int(r);
+                int col = int(q) + row / 2;  // Integer division for stagger adjustment
+                
+                // Handle negative row division correctly
+                if (r < 0.0) {
+                    col = int(q) + int(floor(r / 2.0));
+                }
+                
+                // Check bounds
+                int rowPegCount = u_pegsPerRow;
+                if (row < 0 || row >= u_pegRows) return vec3(0.0, 0.0, 0.0);
+                
+                // Odd rows have one fewer peg
+                if ((row / 2) * 2 != row) {
+                    rowPegCount = u_pegsPerRow - 1;
+                }
+                
+                if (col < 0 || col >= rowPegCount) return vec3(0.0, 0.0, 0.0);
+                
+                // Calculate pixel position
+                float rowStartX = (u_resolution.x - float(rowPegCount - 1) * u_pegSpacingX) / 2.0;
+                float px = rowStartX + float(col) * u_pegSpacingX;
+                float py = u_pegStartY + float(row) * u_pegSpacingY;
+                
+                return vec3(px, py, 1.0);
+            }
+            
+            // ==================== Collision Detection ====================
+            
+            vec2 computeBounceVelocity(vec2 pos, vec2 vel, vec2 center) {
+                vec2 n = normalize(pos - center);
+                float vDotN = dot(vel, n);
+                if (vDotN >= 0.0) return vel;
+                vec2 vn = vDotN * n;
+                return vel - vn - u_damping * vn;
+            }
+            
+            float findBucketHitTime(vec2 p0, vec2 v0) {
+                return solveQuadraticMin(0.5 * u_gravity, v0.y, p0.y - u_bucketY);
+            }
+            
+            // Convert HSL to RGB (h in degrees 0-360, s and l in 0-1)
+            vec3 hsl2rgb(float h, float s, float l) {
+                float c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                float hp = h / 60.0;
+                float x = c * (1.0 - abs(mod(hp, 2.0) - 1.0));
+                vec3 rgb;
+                if (hp < 1.0) rgb = vec3(c, x, 0.0);
+                else if (hp < 2.0) rgb = vec3(x, c, 0.0);
+                else if (hp < 3.0) rgb = vec3(0.0, c, x);
+                else if (hp < 4.0) rgb = vec3(0.0, x, c);
+                else if (hp < 5.0) rgb = vec3(x, 0.0, c);
+                else rgb = vec3(c, 0.0, x);
+                float m = l - c / 2.0;
+                return rgb + vec3(m);
+            }
+            
+            // Get rainbow color based on x position (0-1 normalized)
+            vec3 getRainbowColor(float t) {
+                // t goes from 0 (left) to 1 (right)
+                // Map to hue: 0 (red) to 270 (violet)
+                float hue = t * 270.0;
+                return hsl2rgb(hue, 1.0, 0.5);
+            }
+            
+            // Get normalized position (0-1) within the bucket region
+            float getNormalizedX(float x) {
+                return clamp((x - u_bucketStartX) / u_bucketTotalWidth, 0.0, 1.0);
+            }
+            
+            // Get hex neighbor offset by index (0-5)
+            vec2 getHexNeighbor(int idx) {
+                if (idx == 0) return vec2(1.0, 0.0);    // right
+                if (idx == 1) return vec2(1.0, -1.0);   // upper-right
+                if (idx == 2) return vec2(0.0, -1.0);   // upper-left
+                if (idx == 3) return vec2(-1.0, 0.0);   // left
+                if (idx == 4) return vec2(-1.0, 1.0);   // lower-left
+                return vec2(0.0, 1.0);                   // lower-right
+            }
+            
+            float solvePegCollisionExact(vec2 p0, vec2 v0, vec2 center) {
+                float dx = p0.x - center.x;
+                float dy = p0.y - center.y;
+                float ay = 0.5 * u_gravity;
+                
+                float a4 = ay * ay;
+                float a3 = 2.0 * v0.y * ay;
+                float a2 = v0.x * v0.x + v0.y * v0.y + 2.0 * dy * ay;
+                float a1 = 2.0 * dx * v0.x + 2.0 * dy * v0.y;
+                float a0 = dx * dx + dy * dy - u_pegRadius * u_pegRadius;
+                
+                float t = solveQuarticMinPositive(a4, a3, a2, a1, a0);
+                if (t > EPSILON && t < COLLISION_TMAX) {
+                    vec2 collisionPos = getPosition(p0, v0, t);
+                    vec2 collisionVel = getVelocity(v0, t);
+                    if (dot(collisionVel, center - collisionPos) > 0.0) {
+                        return t;
+                    }
+                }
+                return -1.0;
+            }
+            
+            vec3 findEarliestCollisionExact(vec2 p0, vec2 v0) {
+                float earliestTime = 1000.0;
+                vec2 collidedPegPos = vec2(0.0);
+                
+                for (int row = 0; row < MAX_PEG_ROWS; row++) {
+                    if (row >= u_pegRows) continue;
+                    int rowPegCount = u_pegsPerRow;
+                    if ((row / 2) * 2 != row) {
+                        rowPegCount = u_pegsPerRow - 1;
+                    }
+                    float rowStartX = (u_resolution.x - float(rowPegCount - 1) * u_pegSpacingX) / 2.0;
+                    float py = u_pegStartY + float(row) * u_pegSpacingY;
+                    
+                    for (int col = 0; col < MAX_PEGS_PER_ROW; col++) {
+                        if (col >= rowPegCount) continue;
+                        float px = rowStartX + float(col) * u_pegSpacingX;
+                        vec2 center = vec2(px, py);
+                        float t = solvePegCollisionExact(p0, v0, center);
+                        if (t > EPSILON && t < earliestTime) {
+                            earliestTime = t;
+                            collidedPegPos = center;
+                        }
+                    }
+                }
+                
+                if (earliestTime < 100.0) {
+                    return vec3(earliestTime, collidedPegPos);
+                }
+                return vec3(-1.0, 0.0, 0.0);
+            }
+            
+            // Returns final x position, or -99999 if simulation fails
+            const float INVALID_X = -99999.0;
+            
+            float simulateDrop(vec2 startPos) {
+                vec2 p0 = startPos;
+                vec2 v0 = vec2(0.0);
+                
+                for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+                    vec3 collision = findEarliestCollisionExact(p0, v0);
+                    float earliestTime = collision.x;
+                    vec2 pegPos = collision.yz;
+                    
+                    float bucketTime = findBucketHitTime(p0, v0);
+                    
+                    if (bucketTime > EPSILON && (earliestTime < 0.0 || bucketTime < earliestTime)) {
+                        vec2 finalPos = getPosition(p0, v0, bucketTime);
+                        return finalPos.x;
+                    }
+                    
+                    if (earliestTime > EPSILON && earliestTime < 10.0) {
+                        vec2 collisionPos = getPosition(p0, v0, earliestTime);
+                        vec2 collisionVel = getVelocity(v0, earliestTime);
+                        v0 = computeBounceVelocity(collisionPos, collisionVel, pegPos);
+                        p0 = collisionPos + normalize(collisionPos - pegPos) * 0.01;
+                    } else {
+                        return INVALID_X;
+                    }
+                }
+                return INVALID_X;
+            }
+            
+            // Check if a point is inside any peg using hex lookup
+            bool isInsidePeg(vec2 pos) {
+                float r2 = u_pegRadius * u_pegRadius;
+                vec2 hex = pixelToHex(pos);
+                
+                // Check center cell
+                vec3 centerPeg = hexToPixel(hex.x, hex.y);
+                if (centerPeg.z > 0.5) {
+                    if (dot(pos - centerPeg.xy, pos - centerPeg.xy) < r2) return true;
+                }
+                
+                // Check 6 neighbors
+                for (int n = 0; n < 6; n++) {
+                    vec2 neighborHex = hex + getHexNeighbor(n);
+                    vec3 neighborPeg = hexToPixel(neighborHex.x, neighborHex.y);
+                    if (neighborPeg.z > 0.5) {
+                        if (dot(pos - neighborPeg.xy, pos - neighborPeg.xy) < r2) return true;
+                    }
+                }
+                return false;
+            }
+            
+            void main() {
+                // Screen coordinates (0 to resolution)
+                vec2 screenCoord = vec2(v_uv.x * u_resolution.x, (1.0 - v_uv.y) * u_resolution.y);
+                
+                // Transform screen to world coordinates with zoom and pan
+                // Center of screen in world coords
+                vec2 center = u_resolution * 0.5;
+                // Convert screen coord to world coord
+                vec2 pixelCoord = (screenCoord - center) / u_zoom + center + u_pan;
+                
+                if (pixelCoord.y > u_topRegionHeight) {
+                    gl_FragColor = vec4(u_bgColor, 1.0);
+                    return;
+                }
+                
+                // Black out points inside pegs
+                if (isInsidePeg(pixelCoord)) {
+                    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                    return;
+                }
+                
+                // Add random dither within pixel (scaled by zoom for consistent dithering)
+                vec2 dither = (hash2(screenCoord, u_seed) - 0.5) / u_zoom;
+                vec2 jitteredCoord = pixelCoord + dither;
+                
+                float finalX = simulateDrop(jitteredCoord);
+                if (finalX < -90000.0) {
+                    gl_FragColor = vec4(u_bgColor, 1.0);
+                } else {
+                    float t = getNormalizedX(finalX);
+                    vec3 color = getRainbowColor(t);
+                    gl_FragColor = vec4(color, 1.0);
+                }
+            }
+        `;
+
+        // Accumulation shader - blends new sample with accumulated result
+        const accumFragmentShaderSource = `
+            precision highp float;
+            varying vec2 v_uv;
+            uniform sampler2D u_newSample;
+            uniform sampler2D u_accumulated;
+            uniform float u_weight; // Weight for new sample (1/N)
+            
+            void main() {
+                vec3 newColor = texture2D(u_newSample, v_uv).rgb;
+                vec3 accColor = texture2D(u_accumulated, v_uv).rgb;
+                vec3 blended = mix(accColor, newColor, u_weight);
+                gl_FragColor = vec4(blended, 1.0);
+            }
+        `;
+
+        // Display shader - just shows a texture
+        const displayFragmentShaderSource = `
+            precision highp float;
+            varying vec2 v_uv;
+            uniform sampler2D u_texture;
+            
+            void main() {
+                gl_FragColor = texture2D(u_texture, v_uv);
+            }
+        `;
+
+        // Compile shader helper
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vertexShader, fragmentShader) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program link error:', gl.getProgramInfoLog(program));
+                gl.deleteProgram(program);
+                return null;
+            }
+            return program;
+        }
+
+        // Create shaders
+        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+        const simFragmentShader = createShader(gl, gl.FRAGMENT_SHADER, simFragmentShaderSource);
+        const accumFragmentShader = createShader(gl, gl.FRAGMENT_SHADER, accumFragmentShaderSource);
+        const displayFragmentShader = createShader(gl, gl.FRAGMENT_SHADER, displayFragmentShaderSource);
+
+        const simProgram = createProgram(gl, vertexShader, simFragmentShader);
+        const accumProgram = createProgram(gl, vertexShader, accumFragmentShader);
+        const displayProgram = createProgram(gl, vertexShader, displayFragmentShader);
+
+        // Create fullscreen quad
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+        // Get uniform locations for simulation shader
+        const simUniforms = {
+            position: gl.getAttribLocation(simProgram, 'a_position'),
+            damping: gl.getUniformLocation(simProgram, 'u_damping'),
+            pegRadius: gl.getUniformLocation(simProgram, 'u_pegRadius'),
+            gravity: gl.getUniformLocation(simProgram, 'u_gravity'),
+            topRegionHeight: gl.getUniformLocation(simProgram, 'u_topRegionHeight'),
+            bucketY: gl.getUniformLocation(simProgram, 'u_bucketY'),
+            bucketStartX: gl.getUniformLocation(simProgram, 'u_bucketStartX'),
+            bucketTotalWidth: gl.getUniformLocation(simProgram, 'u_bucketTotalWidth'),
+            bgColor: gl.getUniformLocation(simProgram, 'u_bgColor'),
+            seed: gl.getUniformLocation(simProgram, 'u_seed'),
+            resolution: gl.getUniformLocation(simProgram, 'u_resolution'),
+            // Hex grid uniforms
+            pegSpacingX: gl.getUniformLocation(simProgram, 'u_pegSpacingX'),
+            pegSpacingY: gl.getUniformLocation(simProgram, 'u_pegSpacingY'),
+            pegStartY: gl.getUniformLocation(simProgram, 'u_pegStartY'),
+            gridOriginX: gl.getUniformLocation(simProgram, 'u_gridOriginX'),
+            pegsPerRow: gl.getUniformLocation(simProgram, 'u_pegsPerRow'),
+            pegRows: gl.getUniformLocation(simProgram, 'u_pegRows'),
+            // Zoom and pan uniforms
+            zoom: gl.getUniformLocation(simProgram, 'u_zoom'),
+            pan: gl.getUniformLocation(simProgram, 'u_pan'),
+            
+        };
+
+        // Get uniform locations for accumulation shader
+        const accumUniforms = {
+            position: gl.getAttribLocation(accumProgram, 'a_position'),
+            newSample: gl.getUniformLocation(accumProgram, 'u_newSample'),
+            accumulated: gl.getUniformLocation(accumProgram, 'u_accumulated'),
+            weight: gl.getUniformLocation(accumProgram, 'u_weight')
+        };
+
+        // Get uniform locations for display shader
+        const displayUniforms = {
+            position: gl.getAttribLocation(displayProgram, 'a_position'),
+            texture: gl.getUniformLocation(displayProgram, 'u_texture')
+        };
+
+        // Create framebuffers and textures for ping-pong
+        function createFramebuffer(gl, width, height) {
+            const texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+            const framebuffer = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+
+            return { framebuffer, texture, width, height };
+        }
+
+        // Full resolution framebuffers for high-fidelity rendering
+        const fbSample = createFramebuffer(gl, glCanvas.width, glCanvas.height);
+        const fbAccum1 = createFramebuffer(gl, glCanvas.width, glCanvas.height);
+        const fbAccum2 = createFramebuffer(gl, glCanvas.width, glCanvas.height);
+        
+        // Low resolution framebuffer for fast preview (1/4 resolution = 1/16 pixels)
+        const FAST_MODE_SCALE = 0.25;
+        const fastWidth = Math.floor(glCanvas.width * FAST_MODE_SCALE);
+        const fastHeight = Math.floor(glCanvas.height * FAST_MODE_SCALE);
+        const fbFast = createFramebuffer(gl, fastWidth, fastHeight);
+
+        // Progressive rendering state
+        let sampleCount = 0;
+        let progressiveFrameId = null;
+        let useAccum1 = true; // Toggle for ping-pong
+        const maxSamples = 300; // Stop after this many samples
+        
+        // Fast mode state - used during zoom/pan interaction
+        let isFastMode = false;
+        let interactionTimeout = null;
+        const INTERACTION_SETTLE_DELAY = 150; // Switch to high-fidelity after 150ms of no interaction
+        let pendingFastFrame = null;
+        
+        // Priority system: hover trajectory takes priority over progressive rendering
+        let isHovering = false;
+        let hoverIdleTimeout = null;
+        let pendingHoverRender = null; // requestAnimationFrame ID for throttled hover rendering
+        let pendingOverlayFrame = null;
+        const HOVER_IDLE_DELAY = 200; // Resume AA after mouse stops for 200ms
+
+        // Render one sample to a target framebuffer at specified resolution
+        function renderSample(seed, targetFb, width, height) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targetFb.framebuffer);
+            gl.viewport(0, 0, width, height);
+            gl.useProgram(simProgram);
+
+            // Set uniforms
+            gl.uniform1f(simUniforms.damping, damping);
+            gl.uniform1f(simUniforms.pegRadius, pegRadius);
+            gl.uniform1f(simUniforms.gravity, gravity);
+            gl.uniform1f(simUniforms.topRegionHeight, topRegionHeight);
+            gl.uniform1f(simUniforms.bucketY, bucketY);
+            gl.uniform1f(simUniforms.bucketStartX, bucketStartX);
+            gl.uniform1f(simUniforms.bucketTotalWidth, bucketTotalWidth);
+            gl.uniform3f(simUniforms.bgColor, 15/255, 15/255, 26/255);
+            gl.uniform1f(simUniforms.seed, seed);
+            // Always use full canvas resolution for coordinate calculations
+            gl.uniform2f(simUniforms.resolution, glCanvas.width, glCanvas.height);
+
+            // Hex grid uniforms
+            const gridOriginX = (glCanvas.width - (pegsPerRow - 1) * pegSpacingX) / 2;
+            gl.uniform1f(simUniforms.pegSpacingX, pegSpacingX);
+            gl.uniform1f(simUniforms.pegSpacingY, pegSpacingY);
+            gl.uniform1f(simUniforms.pegStartY, pegStartY);
+            gl.uniform1f(simUniforms.gridOriginX, gridOriginX);
+            gl.uniform1i(simUniforms.pegsPerRow, pegsPerRow);
+            gl.uniform1i(simUniforms.pegRows, pegRows);
+            
+            // Zoom and pan uniforms
+            gl.uniform1f(simUniforms.zoom, zoomLevel);
+            gl.uniform2f(simUniforms.pan, panX, panY);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(simUniforms.position);
+            gl.vertexAttribPointer(simUniforms.position, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        
+        // Render fast preview (low resolution, single sample)
+        function renderFastPreview() {
+            renderSample(Math.random() * 1000, fbFast, fastWidth, fastHeight);
+            displayFastResult();
+            
+            updateStatus();
+        }
+        
+        // Display fast preview result (upscaled to full canvas)
+        function displayFastResult() {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+            gl.useProgram(displayProgram);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, fbFast.texture);
+            gl.uniform1i(displayUniforms.texture, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(displayUniforms.position);
+            gl.vertexAttribPointer(displayUniforms.position, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        
+        function scheduleFastPreview() {
+            if (pendingFastFrame) return;
+            pendingFastFrame = requestAnimationFrame(() => {
+                pendingFastFrame = null;
+                renderFastPreview();
+            });
+        }
+
+        function scheduleOverlayRender() {
+            if (pendingOverlayFrame) return;
+            pendingOverlayFrame = requestAnimationFrame(() => {
+                pendingOverlayFrame = null;
+                drawOverlay();
+            });
+        }
+
+        // Start fast mode for interaction
+        function startFastMode() {
+            if (!isFastMode) {
+                isFastMode = true;
+                cancelProgressiveRender();
+            }
+            
+            // Clear any pending settle timeout
+            if (interactionTimeout) {
+                clearTimeout(interactionTimeout);
+            }
+            
+            // Render fast preview (throttled to the next animation frame)
+            scheduleFastPreview();
+            
+            // Schedule transition back to high-fidelity when interaction settles
+            interactionTimeout = setTimeout(() => {
+                isFastMode = false;
+                interactionTimeout = null;
+                resetProgressive();
+            }, INTERACTION_SETTLE_DELAY);
+        }
+
+        // Accumulate sample
+        function accumulateSample(weight) {
+            const srcAccum = useAccum1 ? fbAccum1 : fbAccum2;
+            const dstAccum = useAccum1 ? fbAccum2 : fbAccum1;
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, dstAccum.framebuffer);
+            gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+            gl.useProgram(accumProgram);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, fbSample.texture);
+            gl.uniform1i(accumUniforms.newSample, 0);
+
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, srcAccum.texture);
+            gl.uniform1i(accumUniforms.accumulated, 1);
+
+            gl.uniform1f(accumUniforms.weight, weight);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(accumUniforms.position);
+            gl.vertexAttribPointer(accumUniforms.position, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            useAccum1 = !useAccum1;
+        }
+
+        // Display accumulated result
+        function displayResult() {
+            const srcAccum = useAccum1 ? fbAccum1 : fbAccum2;
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+            gl.useProgram(displayProgram);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, srcAccum.texture);
+            gl.uniform1i(displayUniforms.texture, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(displayUniforms.position);
+            gl.vertexAttribPointer(displayUniforms.position, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+
+        // Progressive rendering loop - runs at full speed via requestAnimationFrame
+        function progressiveRender() {
+            // Skip if hovering or in fast mode
+            if (isHovering || isFastMode) {
+                progressiveFrameId = null;
+                // Don't reschedule - will be resumed when hover/interaction ends
+                return;
+            }
+            
+            sampleCount++;
+            const seed = Math.random() * 1000;
+
+            renderSample(seed, fbSample, glCanvas.width, glCanvas.height);
+
+            if (sampleCount === 1) {
+                // First sample: just copy to accumulator
+                const dstAccum = useAccum1 ? fbAccum1 : fbAccum2;
+                gl.bindFramebuffer(gl.FRAMEBUFFER, dstAccum.framebuffer);
+                gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+                gl.useProgram(displayProgram);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, fbSample.texture);
+                gl.uniform1i(displayUniforms.texture, 0);
+                gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                gl.enableVertexAttribArray(displayUniforms.position);
+                gl.vertexAttribPointer(displayUniforms.position, 2, gl.FLOAT, false, 0, 0);
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            } else {
+                // Blend: weight = 1/N for new sample
+                const weight = 1.0 / sampleCount;
+                accumulateSample(weight);
+            }
+
+            displayResult();
+            
+            // Continue refining until max samples reached
+            if (sampleCount < maxSamples && !isHovering && !isFastMode) {
+                progressiveFrameId = requestAnimationFrame(progressiveRender);
+            } else {
+                progressiveFrameId = null;
+            }
+        }
+        
+        // Schedule progressive rendering at full speed
+        function scheduleProgressiveRender() {
+            // Don't schedule if hovering, in fast mode, or already scheduled
+            if (isHovering || isFastMode || progressiveFrameId) return;
+            
+            progressiveFrameId = requestAnimationFrame(progressiveRender);
+        }
+        
+        // Cancel any pending progressive rendering
+        function cancelProgressiveRender() {
+            if (progressiveFrameId) {
+                cancelAnimationFrame(progressiveFrameId);
+                progressiveFrameId = null;
+            }
+        }
+
+        function updateStatus() {
+            const statusEl = document.getElementById('status');
+            if (statusEl) statusEl.textContent = zoomLevel > 1.01 ? `${zoomLevel.toFixed(1)}x` : '';
+        }
+
+        // Reset progressive rendering
+        function resetProgressive() {
+            cancelProgressiveRender();
+            sampleCount = 0;
+            useAccum1 = true;
+            updateStatus();
+            // Start rendering at full speed
+            progressiveFrameId = requestAnimationFrame(progressiveRender);
+        }
+
+        // ==================== Hex Grid Lookup ====================
+        function hexRound(q, r) {
+            const s = -q - r;
+            let rq = Math.round(q);
+            let rr = Math.round(r);
+            let rs = Math.round(s);
+            
+            const qDiff = Math.abs(rq - q);
+            const rDiff = Math.abs(rr - r);
+            const sDiff = Math.abs(rs - s);
+            
+            if (qDiff > rDiff && qDiff > sDiff) {
+                rq = -rr - rs;
+            } else if (rDiff > sDiff) {
+                rr = -rq - rs;
+            }
+            
+            return { q: rq, r: rr };
+        }
+
+        function pixelToHexGrid(px, py) {
+            // Grid origin X: center of the first row
+            const row0PegCount = pegsPerRow;  // Even rows have pegsPerRow pegs
+            const gridOriginX = (glCanvas.width - (row0PegCount - 1) * pegSpacingX) / 2;
+            
+            // Transform to grid-relative coordinates
+            const x = px - gridOriginX;
+            const y = py - pegStartY;
+            
+            // Scale to normalized hex space where spacing = 1
+            const normX = x / pegSpacingX;
+            const normY = y / pegSpacingY;
+            
+            // Apply axial coordinate conversion (adapted for our aspect ratio)
+            // Row offset is 0.5 in normalized coords
+            const q = normX - 0.5 * normY;  // Column, accounting for stagger
+            const r = normY;                 // Row
+            
+            return hexRound(q, r);
+        }
+
+        function hexToPixel(q, r) {
+            const row = r;
+            const col = q + Math.floor(r / 2);  // Adjust for stagger
+            
+            // Check bounds
+            const rowPegCount = pegsPerRow - (row % 2 === 0 ? 0 : 1);
+            if (row < 0 || row >= pegRows || col < 0 || col >= rowPegCount) {
+                return null;
+            }
+            
+            // Calculate pixel position (matching generatePegs formula)
+            const rowStartX = (glCanvas.width - (rowPegCount - 1) * pegSpacingX) / 2;
+            
+            return {
+                x: rowStartX + col * pegSpacingX,
+                y: pegStartY + row * pegSpacingY,
+                row: row,
+                col: col
+            };
+        }
+
+        // Hex neighbor offsets in axial coordinates (q, r)
+        const hexNeighborOffsets = [
+            { q: 1, r: 0 },   // right
+            { q: 1, r: -1 },  // upper-right
+            { q: 0, r: -1 },  // upper-left
+            { q: -1, r: 0 },  // left
+            { q: -1, r: 1 },  // lower-left
+            { q: 0, r: 1 }    // lower-right
+        ];
+
+        // Get peg position from hex coordinates, returns null if out of bounds
+        function getPegAtHex(q, r) {
+            return hexToPixel(q, r);
+        }
+
+        // Get all candidate pegs near a position (the cell's peg + neighbors)
+        function getCandidatePegs(px, py) {
+            const hex = pixelToHexGrid(px, py);
+            const candidates = [];
+            
+            // Add the peg at this hex cell
+            const centerPeg = getPegAtHex(hex.q, hex.r);
+            if (centerPeg) candidates.push(centerPeg);
+            
+            // Add neighboring pegs
+            for (const offset of hexNeighborOffsets) {
+                const neighborPeg = getPegAtHex(hex.q + offset.q, hex.r + offset.r);
+                if (neighborPeg) candidates.push(neighborPeg);
+            }
+            
+            return candidates;
+        }
+
+        // Check if a point is inside any peg
+        function isInsidePeg(px, py) {
+            const r2 = pegRadius * pegRadius;
+            const candidates = getCandidatePegs(px, py);
+            for (const peg of candidates) {
+                const dx = px - peg.x;
+                const dy = py - peg.y;
+                if (dx * dx + dy * dy < r2) return true;
+            }
+            return false;
+        }
+
+        // ==================== 2D Canvas Overlay ====================
+        let hoverPos = null;
+        let hoverScreenPos = null;
+        const SOLVER_EPS = 1e-8;
+        const COLLISION_TMAX = 3.0;
+
+        function solveQuadratic(a, b, c) {
+            if (Math.abs(a) < 1e-12) {
+                if (Math.abs(b) < 1e-12) return [];
+                return [-c/b];
+            }
+            const disc = b*b - 4*a*c;
+            if (disc < 0) return [];
+            const sqrtD = Math.sqrt(disc);
+            return [(-b - sqrtD)/(2*a), (-b + sqrtD)/(2*a)].sort((a,b) => a-b);
+        }
+        
+        function solveCubicReal(a, b, c, d) {
+            if (Math.abs(a) < SOLVER_EPS) {
+                if (Math.abs(b) < SOLVER_EPS) {
+                    if (Math.abs(c) < SOLVER_EPS) return [];
+                    return [-d / c];
+                }
+                const disc = c * c - 4 * b * d;
+                if (disc < 0) return [];
+                const s = Math.sqrt(disc);
+                const roots = [(-c - s) / (2 * b), (-c + s) / (2 * b)];
+                return disc < SOLVER_EPS ? [roots[0]] : roots;
+            }
+            
+            const A = b / a;
+            const B = c / a;
+            const C = d / a;
+            
+            const p = B - A * A / 3;
+            const q = 2 * A * A * A / 27 - A * B / 3 + C;
+            const disc = 0.25 * q * q + (p * p * p) / 27;
+            
+            if (disc > SOLVER_EPS) {
+                const sqrtDisc = Math.sqrt(disc);
+                const u = Math.cbrt(-0.5 * q + sqrtDisc);
+                const v = Math.cbrt(-0.5 * q - sqrtDisc);
+                return [u + v - A / 3];
+            }
+            
+            if (disc >= -SOLVER_EPS) {
+                const u = Math.cbrt(-0.5 * q);
+                return [2 * u - A / 3, -u - A / 3, -u - A / 3];
+            }
+            
+            const phi = Math.acos(Math.max(-1, Math.min(1, -0.5 * q / Math.sqrt(-(p * p * p) / 27))));
+            const t = 2 * Math.sqrt(-p / 3);
+            return [
+                t * Math.cos(phi / 3) - A / 3,
+                t * Math.cos((phi + 2 * Math.PI) / 3) - A / 3,
+                t * Math.cos((phi + 4 * Math.PI) / 3) - A / 3
+            ];
+        }
+        
+        function quarticValue(a4, a3, a2, a1, a0, t) {
+            return ((((a4 * t + a3) * t + a2) * t + a1) * t + a0);
+        }
+        
+        function findRootInInterval(a4, a3, a2, a1, a0, lo, hi) {
+            let fLo = quarticValue(a4, a3, a2, a1, a0, lo);
+            let fHi = quarticValue(a4, a3, a2, a1, a0, hi);
+            
+            if (Math.abs(fLo) < SOLVER_EPS) return lo;
+            if (Math.abs(fHi) < SOLVER_EPS) return hi;
+            if (fLo * fHi > 0) return null;
+            
+            let a = lo;
+            let b = hi;
+            let fa = fLo;
+            let fb = fHi;
+            for (let i = 0; i < 24; i++) {
+                const mid = 0.5 * (a + b);
+                const fm = quarticValue(a4, a3, a2, a1, a0, mid);
+                if (Math.abs(fm) < 1e-6) return mid;
+                if (fa * fm <= 0) {
+                    b = mid;
+                    fb = fm;
+                } else {
+                    a = mid;
+                    fa = fm;
+                }
+            }
+            return 0.5 * (a + b);
+        }
+        
+        function solveQuarticMinPositive(a4, a3, a2, a1, a0) {
+            if (Math.abs(a4) < SOLVER_EPS) return null;
+            
+            const roots = solveCubicReal(4 * a4, 3 * a3, 2 * a2, a1);
+            const sorted = roots.slice(0, 3).sort((x, y) => x - y);
+            
+            let minT = Infinity;
+            let tA = 0;
+            
+            for (const r of sorted) {
+                if (r > 0 && r < COLLISION_TMAX) {
+                    const root = findRootInInterval(a4, a3, a2, a1, a0, tA, r);
+                    if (root !== null && root > SOLVER_EPS && root < minT) minT = root;
+                    tA = r;
+                }
+            }
+            
+            const root = findRootInInterval(a4, a3, a2, a1, a0, tA, COLLISION_TMAX);
+            if (root !== null && root > SOLVER_EPS && root < minT) minT = root;
+            
+            return minT === Infinity ? null : minT;
+        }
+
+        function getPositionJS(p0, v0, t) {
+            return { x: p0.x + v0.x * t, y: p0.y + v0.y * t + 0.5 * gravity * t * t };
+        }
+
+        function getVelocityJS(v0, t) {
+            return { x: v0.x, y: v0.y + gravity * t };
+        }
+
+        
+        function solvePegCollisionExactJS(p0, v0, center, radius) {
+            const dx = p0.x - center.x;
+            const dy = p0.y - center.y;
+            const ay = 0.5 * gravity;
+            
+            const a4 = ay * ay;
+            const a3 = 2 * v0.y * ay;
+            const a2 = v0.x * v0.x + v0.y * v0.y + 2 * dy * ay;
+            const a1 = 2 * dx * v0.x + 2 * dy * v0.y;
+            const a0 = dx * dx + dy * dy - radius * radius;
+            
+            const t = solveQuarticMinPositive(a4, a3, a2, a1, a0);
+            if (t !== null && t > SOLVER_EPS && t < COLLISION_TMAX) {
+                const collisionPos = getPositionJS(p0, v0, t);
+                const collisionVel = getVelocityJS(v0, t);
+                const toCenter = { x: center.x - collisionPos.x, y: center.y - collisionPos.y };
+                if (collisionVel.x * toCenter.x + collisionVel.y * toCenter.y > 0) {
+                    return t;
+                }
+            }
+            return null;
+        }
+        
+        // Exact collision detection using quartic roots
+        function findEarliestCollisionExactJS(p0, v0) {
+            let earliestTime = null;
+            let collidedPeg = null;
+            
+            for (const peg of pegs) {
+                const t = solvePegCollisionExactJS(p0, v0, peg, pegRadius);
+                if (t !== null && (earliestTime === null || t < earliestTime)) {
+                    earliestTime = t;
+                    collidedPeg = peg;
+                }
+            }
+            
+            return { time: earliestTime, peg: collidedPeg };
+        }
+        
+        function findEarliestCollisionJS(p0, v0) {
+            return findEarliestCollisionExactJS(p0, v0);
+        }
+
+        function computeBounceVelocityJS(pos, vel, center) {
+            const dx = pos.x - center.x, dy = pos.y - center.y;
+            const len = Math.sqrt(dx*dx + dy*dy);
+            const nx = dx/len, ny = dy/len;
+            const vDotN = vel.x * nx + vel.y * ny;
+            if (vDotN >= 0) return vel;
+            const vnx = vDotN * nx, vny = vDotN * ny;
+            return { x: vel.x - vnx - damping * vnx, y: vel.y - vny - damping * vny };
+        }
+
+        function computeTrajectory(startPos) {
+            const segments = [];
+            let p0 = { ...startPos }, v0 = { x: 0, y: 0 };
+            
+            for (let bounce = 0; bounce < 50; bounce++) {
+                const collision = findEarliestCollisionJS(p0, v0);
+                const bucketTime = solveQuadratic(0.5 * gravity, v0.y, p0.y - bucketY).find(t => t > 0.0001) || Infinity;
+                const collisionTime = collision.time !== null ? collision.time : Infinity;
+                
+                if (bucketTime < collisionTime && bucketTime < 10) {
+                    segments.push({ p0: {...p0}, v0: {...v0}, duration: bucketTime, endsWithBounce: false });
+                    break;
+                }
+                if (collisionTime < 10) {
+                    segments.push({ p0: {...p0}, v0: {...v0}, duration: collisionTime, endsWithBounce: true });
+                    const collisionPos = getPositionJS(p0, v0, collisionTime);
+                    const collisionVel = getVelocityJS(v0, collisionTime);
+                    v0 = computeBounceVelocityJS(collisionPos, collisionVel, collision.peg);
+                    const norm = Math.sqrt((collisionPos.x - collision.peg.x)**2 + (collisionPos.y - collision.peg.y)**2);
+                    p0 = {
+                        x: collisionPos.x + (collisionPos.x - collision.peg.x) / norm * 0.01,
+                        y: collisionPos.y + (collisionPos.y - collision.peg.y) / norm * 0.01
+                    };
+                } else {
+                    segments.push({ p0: {...p0}, v0: {...v0}, duration: 10, endsWithBounce: false });
+                    break;
+                }
+            }
+            return segments;
+        }
+
+        // Convert world coordinates to screen coordinates (for drawing)
+        function worldToScreen(worldX, worldY) {
+            const centerX = overlayCanvas.width / 2;
+            const centerY = overlayCanvas.height / 2;
+            return {
+                x: (worldX - centerX - panX) * zoomLevel + centerX,
+                y: (worldY - centerY - panY) * zoomLevel + centerY
+            };
+        }
+        
+        // Convert screen coordinates to world coordinates (for mouse input)
+        function screenToWorld(screenX, screenY) {
+            const centerX = overlayCanvas.width / 2;
+            const centerY = overlayCanvas.height / 2;
+            return {
+                x: (screenX - centerX) / zoomLevel + centerX + panX,
+                y: (screenY - centerY) / zoomLevel + centerY + panY
+            };
+        }
+
+        const POPUP_WIDTH = 220;
+        const POPUP_HEIGHT = 180;
+        const POPUP_PADDING = 12;
+        const POPUP_OFFSET = 14;
+        const POPUP_MARGIN = 6;
+
+        function buildRoundedRectPath(x, y, w, h, r) {
+            const radius = Math.min(r, w / 2, h / 2);
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + w - radius, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+            ctx.lineTo(x + w, y + h - radius);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+            ctx.lineTo(x + radius, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+        }
+
+        function drawMiniBoardPopup(worldPos, screenPos) {
+            if (!worldPos || !screenPos) return;
+
+            let popupX = screenPos.x + POPUP_OFFSET;
+            let popupY = screenPos.y - POPUP_OFFSET - POPUP_HEIGHT;
+
+            if (popupX + POPUP_WIDTH > overlayCanvas.width - POPUP_MARGIN) {
+                popupX = overlayCanvas.width - POPUP_WIDTH - POPUP_MARGIN;
+            }
+            if (popupX < POPUP_MARGIN) popupX = POPUP_MARGIN;
+
+            if (popupY < POPUP_MARGIN) {
+                popupY = screenPos.y + POPUP_OFFSET;
+                if (popupY + POPUP_HEIGHT > overlayCanvas.height - POPUP_MARGIN) {
+                    popupY = overlayCanvas.height - POPUP_HEIGHT - POPUP_MARGIN;
+                }
+            }
+
+            ctx.save();
+            ctx.fillStyle = 'rgba(15, 15, 26, 0.95)';
+            ctx.strokeStyle = '#4b4b66';
+            ctx.lineWidth = 1;
+            buildRoundedRectPath(popupX, popupY, POPUP_WIDTH, POPUP_HEIGHT, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            const innerX = popupX + POPUP_PADDING;
+            const innerY = popupY + POPUP_PADDING;
+            const innerW = POPUP_WIDTH - POPUP_PADDING * 2;
+            const innerH = POPUP_HEIGHT - POPUP_PADDING * 2;
+
+            const scale = Math.min(innerW / glCanvas.width, innerH / glCanvas.height);
+            const boardW = glCanvas.width * scale;
+            const boardH = glCanvas.height * scale;
+            const boardX = innerX + (innerW - boardW) / 2;
+            const boardY = innerY + (innerH - boardH) / 2;
+
+            // Draw pegs
+            for (const peg of pegs) {
+                ctx.beginPath();
+                ctx.arc(boardX + peg.x * scale, boardY + peg.y * scale, Math.max(0.6, pegRadius * scale), 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(100, 100, 200, 0.3)';
+                ctx.fill();
+                ctx.strokeStyle = '#6666cc';
+                ctx.lineWidth = Math.max(0.6, 1.5 * scale);
+                ctx.stroke();
+            }
+
+            if (worldPos.y < topRegionHeight && !isInsidePeg(worldPos.x, worldPos.y)) {
+                const segments = computeTrajectory(worldPos);
+                ctx.strokeStyle = '#ffaa00';
+                ctx.lineWidth = Math.max(0.8, 2.0 * scale);
+
+                for (const segment of segments) {
+                    ctx.beginPath();
+                    for (let i = 0; i <= 80; i++) {
+                        const t = (i / 80) * segment.duration;
+                        const pos = getPositionJS(segment.p0, segment.v0, t);
+                        const px = boardX + pos.x * scale;
+                        const py = boardY + pos.y * scale;
+                        if (i === 0) ctx.moveTo(px, py);
+                        else ctx.lineTo(px, py);
+                    }
+                    ctx.stroke();
+                    if (segment.endsWithBounce) {
+                        const bouncePos = getPositionJS(segment.p0, segment.v0, segment.duration);
+                        ctx.beginPath();
+                        ctx.arc(boardX + bouncePos.x * scale, boardY + bouncePos.y * scale, Math.max(0.6, 2.6 * scale), 0, Math.PI * 2);
+                        ctx.fillStyle = '#ff4444';
+                        ctx.fill();
+                    }
+                }
+
+                ctx.beginPath();
+                ctx.arc(boardX + worldPos.x * scale, boardY + worldPos.y * scale, Math.max(0.7, 3.0 * scale), 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = Math.max(0.6, 1.6 * scale);
+                ctx.stroke();
+            }
+
+            ctx.restore();
+        }
+
+        function drawOverlay() {
+            ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            updateStatus();
+
+            // Save context and apply zoom/pan transformation
+            ctx.save();
+            const centerX = overlayCanvas.width / 2;
+            const centerY = overlayCanvas.height / 2;
+            ctx.translate(centerX, centerY);
+            ctx.scale(zoomLevel, zoomLevel);
+            ctx.translate(-centerX - panX, -centerY - panY);
+            
+            for (const peg of pegs) {
+                ctx.beginPath();
+                ctx.arc(peg.x, peg.y, pegRadius, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(100, 100, 200, 0.3)';
+                ctx.fill();
+                ctx.strokeStyle = '#6666cc';
+                ctx.lineWidth = 2 / zoomLevel; // Keep stroke width consistent on screen
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(peg.x, peg.y, 3, 0, Math.PI * 2);
+                ctx.fillStyle = '#6666cc';
+                ctx.fill();
+            }
+            
+            // Only show trajectory on main board when fully zoomed out
+            if (isFullyZoomedOut() && hoverPos && hoverPos.y < topRegionHeight && !isInsidePeg(hoverPos.x, hoverPos.y)) {
+                const segments = computeTrajectory(hoverPos);
+                ctx.strokeStyle = '#ffaa00';
+                ctx.lineWidth = 2 / zoomLevel;
+                
+                for (const segment of segments) {
+                    ctx.beginPath();
+                    for (let i = 0; i <= 100; i++) {
+                        const t = (i / 100) * segment.duration;
+                        const pos = getPositionJS(segment.p0, segment.v0, t);
+                        if (i === 0) ctx.moveTo(pos.x, pos.y);
+                        else ctx.lineTo(pos.x, pos.y);
+                    }
+                    ctx.stroke();
+                    if (segment.endsWithBounce) {
+                        const bouncePos = getPositionJS(segment.p0, segment.v0, segment.duration);
+                        ctx.beginPath();
+                        ctx.arc(bouncePos.x, bouncePos.y, 5, 0, Math.PI * 2);
+                        ctx.fillStyle = '#ff4444';
+                        ctx.fill();
+                    }
+                }
+                
+                ctx.beginPath();
+                ctx.arc(hoverPos.x, hoverPos.y, 6, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2 / zoomLevel;
+                ctx.stroke();
+            }
+            
+            ctx.restore();
+
+            // Show mini preview popup when zoomed in
+            if (!isFullyZoomedOut() && hoverPos && hoverScreenPos && !isPanning) {
+                drawMiniBoardPopup(hoverPos, hoverScreenPos);
+            }
+        }
+
+        // ==================== Event Handlers ====================
+        function getMousePos(e) {
+            const rect = overlayCanvas.getBoundingClientRect();
+            // Scale from CSS pixels to canvas pixels
+            const scaleX = overlayCanvas.width / rect.width;
+            const scaleY = overlayCanvas.height / rect.height;
+            return { 
+                x: (e.clientX - rect.left) * scaleX, 
+                y: (e.clientY - rect.top) * scaleY 
+            };
+        }
+
+        // ==================== Zoom Handler ====================
+        overlayCanvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            
+            const mousePos = getMousePos(e);
+            const worldPos = screenToWorld(mousePos.x, mousePos.y);
+            
+            // Calculate zoom change
+            const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+            const newZoom = Math.max(minZoom, Math.min(maxZoom, zoomLevel * zoomFactor));
+            
+            if (newZoom !== zoomLevel) {
+                // Adjust pan to zoom toward mouse position
+                const centerX = overlayCanvas.width / 2;
+                const centerY = overlayCanvas.height / 2;
+                
+                // Keep the world point under the mouse fixed
+                panX = worldPos.x - centerX - (mousePos.x - centerX) / newZoom;
+                panY = worldPos.y - centerY - (mousePos.y - centerY) / newZoom;
+                
+                zoomLevel = newZoom;
+                
+                // Clamp pan when zoomed out
+                if (isFullyZoomedOut()) {
+                    panX = 0;
+                    panY = 0;
+                }
+                
+                // Use fast mode during interaction
+                startFastMode();
+                scheduleOverlayRender();
+                
+                // Update cursor
+                updateCursor();
+            }
+        }, { passive: false });
+
+        // ==================== Pan Handlers ====================
+        function updateCursor() {
+            overlayCanvas.style.cursor = 'crosshair';
+        }
+
+        overlayCanvas.addEventListener('mousedown', (e) => {
+            if (!isFullyZoomedOut()) {
+                isPanning = true;
+                const pos = getMousePos(e);
+                lastPanMouseX = pos.x;
+                lastPanMouseY = pos.y;
+                updateCursor();
+                e.preventDefault();
+            }
+        });
+
+        overlayCanvas.addEventListener('mouseup', () => {
+            if (isPanning) {
+                isPanning = false;
+                updateCursor();
+            }
+        });
+
+        overlayCanvas.addEventListener('mousemove', (e) => {
+            const screenPos = getMousePos(e);
+            
+            // Handle panning when zoomed in
+            if (isPanning && !isFullyZoomedOut()) {
+                const dx = (screenPos.x - lastPanMouseX) / zoomLevel;
+                const dy = (screenPos.y - lastPanMouseY) / zoomLevel;
+                panX -= dx;
+                panY -= dy;
+                lastPanMouseX = screenPos.x;
+                lastPanMouseY = screenPos.y;
+                
+                // Use fast mode during interaction
+                startFastMode();
+                scheduleOverlayRender();
+                return;
+            }
+            
+            // Convert to world coordinates for trajectory
+            const worldPos = screenToWorld(screenPos.x, screenPos.y);
+            
+            // Only enable trajectory hover when fully zoomed out
+            if (ENABLE_TRAJECTORY_ON_HOVER && worldPos.y < topRegionHeight) {
+                // Set hover state and IMMEDIATELY cancel any pending progressive rendering
+                isHovering = true;
+                cancelProgressiveRender();
+                
+                hoverPos = worldPos;
+                hoverScreenPos = screenPos;
+                
+                // Clear any pending idle timeout for resuming
+                if (hoverIdleTimeout) {
+                    clearTimeout(hoverIdleTimeout);
+                }
+                
+                // Throttle trajectory rendering to once per animation frame
+                if (!pendingHoverRender) {
+                    pendingHoverRender = requestAnimationFrame(() => {
+                        pendingHoverRender = null;
+                        drawOverlay();
+                    });
+                }
+                
+                // After mouse stops moving, resume progressive rendering
+                hoverIdleTimeout = setTimeout(() => {
+                    isHovering = false;
+                    if (sampleCount < maxSamples) {
+                        scheduleProgressiveRender();
+                    }
+                }, HOVER_IDLE_DELAY);
+            } else if (hoverPos !== null) {
+                isHovering = false;
+                hoverPos = null;
+                hoverScreenPos = null;
+                if (pendingHoverRender) {
+                    cancelAnimationFrame(pendingHoverRender);
+                    pendingHoverRender = null;
+                }
+                scheduleOverlayRender();
+                if (hoverIdleTimeout) {
+                    clearTimeout(hoverIdleTimeout);
+                    hoverIdleTimeout = null;
+                }
+            }
+        });
+
+        overlayCanvas.addEventListener('mouseleave', () => {
+            // Stop panning
+            if (isPanning) {
+                isPanning = false;
+                updateCursor();
+            }
+            
+            // Clear hover state - resumes progressive rendering
+            isHovering = false;
+            if (hoverIdleTimeout) {
+                clearTimeout(hoverIdleTimeout);
+                hoverIdleTimeout = null;
+            }
+            if (hoverPos !== null) {
+                hoverPos = null;
+                hoverScreenPos = null;
+                scheduleOverlayRender();
+            }
+            // Resume progressive rendering if not complete
+            if (sampleCount < maxSamples && !progressiveFrameId) {
+                scheduleProgressiveRender();
+            }
+        });
+        
+
+        // ==================== Touch Handlers ====================
+        let touchState = {
+            type: null, // 'pan', 'pinch', 'hover'
+            initialPinchDist: 0,
+            initialZoom: 1,
+            pinchCenterWorld: null,
+            lastSingleTouch: null,
+        };
+
+        function getTouchPos(touch) {
+            const rect = overlayCanvas.getBoundingClientRect();
+            const scaleX = overlayCanvas.width / rect.width;
+            const scaleY = overlayCanvas.height / rect.height;
+            return {
+                x: (touch.clientX - rect.left) * scaleX,
+                y: (touch.clientY - rect.top) * scaleY
+            };
+        }
+
+        function getPinchDistance(t1, t2) {
+            const dx = t1.clientX - t2.clientX;
+            const dy = t1.clientY - t2.clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function getPinchCenter(t1, t2) {
+            const rect = overlayCanvas.getBoundingClientRect();
+            const scaleX = overlayCanvas.width / rect.width;
+            const scaleY = overlayCanvas.height / rect.height;
+            return {
+                x: ((t1.clientX + t2.clientX) / 2 - rect.left) * scaleX,
+                y: ((t1.clientY + t2.clientY) / 2 - rect.top) * scaleY
+            };
+        }
+
+        overlayCanvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touches = e.touches;
+
+            if (touches.length === 2) {
+                touchState.type = 'pinch';
+                touchState.initialPinchDist = getPinchDistance(touches[0], touches[1]);
+                touchState.initialZoom = zoomLevel;
+                const pc = getPinchCenter(touches[0], touches[1]);
+                touchState.pinchCenterWorld = screenToWorld(pc.x, pc.y);
+
+                isHovering = false;
+                hoverPos = null;
+                hoverScreenPos = null;
+            } else if (touches.length === 1) {
+                const screenPos = getTouchPos(touches[0]);
+                if (!isFullyZoomedOut()) {
+                    touchState.type = 'pan';
+                    touchState.lastSingleTouch = screenPos;
+                    isPanning = true;
+                } else {
+                    touchState.type = 'hover';
+                    const worldPos = screenToWorld(screenPos.x, screenPos.y);
+                    isHovering = true;
+                    cancelProgressiveRender();
+                    hoverPos = worldPos;
+                    hoverScreenPos = screenPos;
+                    scheduleOverlayRender();
+                }
+            }
+        }, { passive: false });
+
+        overlayCanvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const touches = e.touches;
+
+            if (touches.length === 2 && touchState.type === 'pinch') {
+                const newDist = getPinchDistance(touches[0], touches[1]);
+                const scale = newDist / touchState.initialPinchDist;
+                const newZoom = Math.max(minZoom, Math.min(maxZoom, touchState.initialZoom * scale));
+
+                if (newZoom !== zoomLevel) {
+                    const centerX = overlayCanvas.width / 2;
+                    const centerY = overlayCanvas.height / 2;
+                    const worldPt = touchState.pinchCenterWorld;
+                    const screenPt = getPinchCenter(touches[0], touches[1]);
+
+                    panX = worldPt.x - centerX - (screenPt.x - centerX) / newZoom;
+                    panY = worldPt.y - centerY - (screenPt.y - centerY) / newZoom;
+                    zoomLevel = newZoom;
+
+                    if (isFullyZoomedOut()) {
+                        panX = 0;
+                        panY = 0;
+                    }
+
+                    startFastMode();
+                    scheduleOverlayRender();
+                }
+            } else if (touches.length === 1) {
+                const screenPos = getTouchPos(touches[0]);
+
+                if (touchState.type === 'pan' && !isFullyZoomedOut()) {
+                    const dx = (screenPos.x - touchState.lastSingleTouch.x) / zoomLevel;
+                    const dy = (screenPos.y - touchState.lastSingleTouch.y) / zoomLevel;
+                    panX -= dx;
+                    panY -= dy;
+                    touchState.lastSingleTouch = screenPos;
+
+                    startFastMode();
+                    scheduleOverlayRender();
+                } else if (touchState.type === 'hover') {
+                    const worldPos = screenToWorld(screenPos.x, screenPos.y);
+                    hoverPos = worldPos;
+                    hoverScreenPos = screenPos;
+
+                    if (!pendingHoverRender) {
+                        pendingHoverRender = requestAnimationFrame(() => {
+                            pendingHoverRender = null;
+                            drawOverlay();
+                        });
+                    }
+                }
+            }
+        }, { passive: false });
+
+        overlayCanvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            const touches = e.touches;
+
+            if (touches.length === 0) {
+                if (touchState.type === 'hover') {
+                    isHovering = false;
+                    hoverPos = null;
+                    hoverScreenPos = null;
+                    scheduleOverlayRender();
+                    if (sampleCount < maxSamples && !progressiveFrameId) {
+                        scheduleProgressiveRender();
+                    }
+                }
+                isPanning = false;
+                touchState.type = null;
+            } else if (touches.length === 1 && touchState.type === 'pinch') {
+                // Went from 2 fingers to 1: switch to pan
+                touchState.type = 'pan';
+                touchState.lastSingleTouch = getTouchPos(touches[0]);
+                isPanning = true;
+            }
+        }, { passive: false });
+
+        overlayCanvas.addEventListener('touchcancel', () => {
+            isPanning = false;
+            isHovering = false;
+            hoverPos = null;
+            hoverScreenPos = null;
+            touchState.type = null;
+            scheduleOverlayRender();
+            if (sampleCount < maxSamples && !progressiveFrameId) {
+                scheduleProgressiveRender();
+            }
+        });
+
+        // Initial render
+        if (ENABLE_FRACTAL_RENDERING) {
+            resetProgressive();
+        }
+        drawOverlay();
+    </script>
+</body>
+</html>
