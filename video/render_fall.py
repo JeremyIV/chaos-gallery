@@ -29,9 +29,9 @@ from grading import grade
 TEST = "--test" in sys.argv
 OUT = next((a for a in sys.argv[1:] if not a.startswith("-")), "pendulum_fall.mp4")
 
-W_OUT, H_OUT = (270, 480) if TEST else (1080, 1920)
+W_OUT, H_OUT = (270, 360) if TEST else (1080, 1440)
 FPS = 30 if TEST else 60
-FWD_S = 2.5 if TEST else 20.0
+FWD_S = 2.5 if TEST else 27.0
 HOLD_END_S = 0.3 if TEST else 0.5
 HOLD_FRACTAL_S = 0.4 if TEST else 3.0
 REV_STRIDE = 1
@@ -42,12 +42,12 @@ HWX = 4.8
 HWY = HWX * H_OUT / W_OUT
 HW_MID, HW_END = 2.0, 1.4
 ZOOM_SPLIT = 0.6
-DT, SPRING, HH, FRIC = 0.02, 0.5, 0.1225, 0.15
+DT, SPRING, HH, FRIC = 0.04 / 3, 0.5, 0.1225, 0.15
 MAGS = [(0.0, 1.0), (-0.866, -0.5), (0.866, -0.5)]
 COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
 GRAY, BG = (40, 40, 44), (16, 16, 20)
-BASIN_MAX_STEPS = 4500
-GRADE = dict(exposure=1.9, gamma=0.85, crosstalk=0.05, bloom_thresh=2.5)
+BASIN_MAX_STEPS = 6750
+GRADE = dict(exposure=0.9, gamma=0.65, crosstalk=0.05, bloom_thresh=2.5)
 
 PW, PH = int(W_OUT * SS), int(H_OUT * SS)
 DEV = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
