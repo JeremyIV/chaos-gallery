@@ -15,6 +15,7 @@ Usage:
   python3 render_fall.py out.mp4          # full render: 1080x1920, 60 fps, 20 s
   python3 render_fall.py out.mp4 --test   # quick 270x480, 30 fps, 3 s sanity run
 """
+import json
 import math
 import subprocess
 import sys
@@ -22,7 +23,8 @@ import time
 
 import numpy as np
 import torch
-from scipy.ndimage import gaussian_filter, zoom
+
+from grading import grade
 
 TEST = "--test" in sys.argv
 OUT = next((a for a in sys.argv[1:] if not a.startswith("-")), "pendulum_fall.mp4")
@@ -45,9 +47,7 @@ MAGS = [(0.0, 1.0), (-0.866, -0.5), (0.866, -0.5)]
 COLORS = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
 GRAY, BG = (40, 40, 44), (16, 16, 20)
 BASIN_MAX_STEPS = 4500
-CROSSTALK = 0.06
-EXPOSURE = 2.4
-BLOOM_THRESH = 2.0
+GRADE = dict(exposure=1.9, gamma=0.85, crosstalk=0.05, bloom_thresh=2.5)
 
 PW, PH = int(W_OUT * SS), int(H_OUT * SS)
 DEV = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -117,7 +117,7 @@ def basin_colors():
     return col
 
 
-def splat(xn, yn, col, hw):
+def accumulate(xn, yn, col, hw):
     hh = hw * H_OUT / W_OUT
     sx = (xn / (2 * hw) + 0.5) * W_OUT - 0.5
     sy = (0.5 - yn / (2 * hh)) * H_OUT - 0.5
@@ -135,17 +135,7 @@ def splat(xn, yn, col, hw):
         for c in range(3):
             accc[c] += np.bincount(idx, weights=wo * col[ok, c], minlength=H_OUT * W_OUT)
     energy = 1.0 / (SS * SS * 255.0)
-    acc = np.stack([a.reshape(H_OUT, W_OUT) for a in accc], axis=-1).astype(np.float32) * energy
-    tot = acc.sum(axis=-1, keepdims=True)
-    L = (1.0 - CROSSTALK) * acc + (CROSSTALK / 2.0) * (tot - acc)
-    excess = np.maximum(L - BLOOM_THRESH, 0.0)
-    L = L + 0.5 * gaussian_filter(excess, sigma=(6, 6, 0))
-    wide = gaussian_filter(np.ascontiguousarray(excess[::4, ::4]), sigma=(5, 5, 0))
-    L = L + 0.22 * zoom(wide, (H_OUT / wide.shape[0], W_OUT / wide.shape[1], 1), order=1)
-    t = 1.0 - np.exp(-EXPOSURE * L)
-    bg = np.array(BG, dtype=np.float32)
-    frame = bg + (255.0 - bg) * t
-    return np.clip(frame, 0, 255).astype(np.uint8)
+    return np.stack([a.reshape(H_OUT, W_OUT) for a in accc], axis=-1).astype(np.float32) * energy
 
 
 def main():
@@ -155,7 +145,15 @@ def main():
     vx = torch.zeros_like(x)
     vy = torch.zeros_like(y)
     fwd_frames = round(FWD_S * FPS)
-    frames = [splat(x.cpu().numpy(), y.cpu().numpy(), col, HWX)]
+    hdr_path = OUT.rsplit(".", 1)[0] + "_hdr_master.raw"
+    hdr_f = open(hdr_path, "wb")
+
+    def emit(hw):
+        acc = accumulate(x.cpu().numpy(), y.cpu().numpy(), col, hw)
+        hdr_f.write(acc.astype(np.float16).tobytes())
+        return grade(acc, **GRADE)
+
+    frames = [emit(HWX)]
     t0 = time.time()
     for f in range(fwd_frames):
         for _ in range(STEPS_PER_FRAME):
@@ -169,21 +167,16 @@ def main():
             s = (u - ZOOM_SPLIT) / (1 - ZOOM_SPLIT)
             s = s * s * (3 - 2 * s)
             hw = HW_MID * (HW_END / HW_MID) ** s
-        frames.append(splat(x.cpu().numpy(), y.cpu().numpy(), col, hw))
+        frames.append(emit(hw))
         if f % 60 == 59:
             el = time.time() - t0
             print(f"  frame {f+1}/{fwd_frames}  {el:.0f}s elapsed, "
                   f"ETA {el/(f+1)*(fwd_frames-f-1):.0f}s", flush=True)
-    master_path = OUT.rsplit(".", 1)[0] + "_master.mkv"
-    mf = subprocess.Popen(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-         "-s", f"{W_OUT}x{H_OUT}", "-r", str(FPS), "-i", "-", "-c:v", "ffv1", master_path],
-        stdin=subprocess.PIPE)
-    for fr in frames:
-        mf.stdin.write(fr.tobytes())
-    mf.stdin.close()
-    mf.wait()
-    print(f"wrote lossless forward master {master_path} ({len(frames)} frames)", flush=True)
+    hdr_f.close()
+    with open(hdr_path.rsplit(".", 1)[0] + ".json", "w") as jf:
+        json.dump({"width": W_OUT, "height": H_OUT, "fps": FPS,
+                   "frames": len(frames), "dtype": "float16"}, jf)
+    print(f"wrote HDR forward master {hdr_path} ({len(frames)} frames)", flush=True)
     last = len(frames) - 1
     rev = list(range(last, -1, -REV_STRIDE))
     if rev[-1] != 0:
