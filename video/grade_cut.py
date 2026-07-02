@@ -13,6 +13,11 @@ Usage:
 SPEC tokens (playback order): fwd | rev | hold0:SECONDS | holdN:SECONDS
 --trim-end drops the last S seconds of the forward master (the near-converged
 tail), shortening fwd, rev, and the frame holdN refers to.
+--auto enables auto-exposure: per frame, base k is set so the 99th percentile
+of lit-pixel brightness sits just below white (top ~1% of the light may clip),
+clamped at --exposure (default 1.9, the wide-open aperture), and smoothed over
+~0.75 s in log space. Exposure is a pure function of frame content, so the
+loop starts and ends at the same k automatically.
 
 Example (fractal-first cut, softer highlights):
   grade_cut.py m_hdr_master.raw out.mp4 hold0:1 fwd holdN:0.5 rev hold0:2 --exposure 1.6
@@ -23,12 +28,16 @@ import sys
 import time
 
 import numpy as np
+from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
 from grading import grade
 
 args = sys.argv[1:]
 opts = {}
 trim_end = 0.0
+auto = "--auto" in args
+if auto:
+    args.remove("--auto")
 if "--trim-end" in args:
     i = args.index("--trim-end")
     trim_end = float(args[i + 1])
@@ -50,10 +59,35 @@ N = max(2, N_ALL - round(trim_end * FPS))
 print(f"master: {N_ALL} frames {W}x{H}@{FPS}, using first {N} "
       f"(trim-end {trim_end}s); grade opts: {opts or 'defaults'}", flush=True)
 
+expo = None
+if auto:
+    k_max = opts.pop("exposure", 1.9)
+    g = opts.get("gamma", 0.65)
+    ct = opts.get("crosstalk", 0.05)
+    bt = opts.get("bloom_thresh", 2.5)
+    t0 = time.time()
+    p99 = np.ones(N)
+    for i in range(N):
+        a = np.asarray(hdr[i][::4, ::4], dtype=np.float32)
+        tot = a.sum(axis=-1, keepdims=True)
+        L = (1 - ct) * a + (ct / 2) * (tot - a)
+        ex = np.maximum(L - bt, 0.0)
+        L = L + 0.4 * gaussian_filter(ex, (1.5, 1.5, 0)) + 0.18 * gaussian_filter(ex, (5, 5, 0))
+        mx = L.max(axis=-1)
+        lit = mx[mx > 0.02]
+        if lit.size:
+            p99[i] = max(np.percentile(lit, 99), 1e-3)
+    k_raw = np.clip(4.2 / np.power(p99, g), 0.15, k_max)
+    expo = np.exp(gaussian_filter1d(np.log(k_raw), FPS * 0.75, mode="nearest"))
+    print(f"auto-exposure: metered {N} frames in {time.time()-t0:.0f}s; "
+          f"k range {expo.min():.2f}..{expo.max():.2f} "
+          f"(raw {k_raw.min():.2f}..{k_raw.max():.2f})", flush=True)
+
 t0 = time.time()
 graded = []
 for i in range(N):
-    graded.append(grade(np.asarray(hdr[i], dtype=np.float32), **opts))
+    o = dict(opts, exposure=float(expo[i])) if auto else opts
+    graded.append(grade(np.asarray(hdr[i], dtype=np.float32), **o))
     if i % 200 == 199:
         el = time.time() - t0
         print(f"  graded {i+1}/{N}  {el:.0f}s, ETA {el/(i+1)*(N-i-1):.0f}s", flush=True)
