@@ -138,7 +138,7 @@ function sizeCanvases() {
   const rect = stage.getBoundingClientRect();
   cssW = rect.width >= 2 ? rect.width : 928;
   cssH = rect.height >= 2 ? rect.height : cssW * 0.75;
-  RW = Math.max(160, Math.min(480, Math.round(cssW / 2)));
+  RW = Math.max(160, Math.min(640, Math.round(cssW * Math.min(window.devicePixelRatio || 1, 2) / 2)));
   RH = Math.round(RW * 0.75);
   basin.width = RW; basin.height = RH;
   const dpr = window.devicePixelRatio || 1;
