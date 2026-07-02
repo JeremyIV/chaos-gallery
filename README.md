@@ -16,9 +16,13 @@ fractal, and you can zoom in more or less forever.
   [plinko-fractal-2](https://github.com/JeremyIV/plinko-fractal-2).
 - **[Magnetic pendulum](https://jeremyiv.github.io/chaos-gallery/#pendulum)** — every pixel
   is a release point of a damped pendulum over three magnets, colored by which magnet
-  captures it, with optional contour-band shading by capture time. One full simulation per
-  sample, rendered progressively across Web Workers with up to 32 jittered anti-aliasing
-  samples per pixel. Scroll to zoom, drag to pan, hover to trace a trajectory, click to pin it.
+  captures it. One full simulation per sample, rendered progressively across Web Workers
+  with up to 32 jittered anti-aliasing samples per pixel. Scroll to zoom (zooming out is
+  the rewarding direction), drag to pan, hover to trace a trajectory, click to pin it.
+- **[Three-body decay](https://jeremyiv.github.io/chaos-gallery/#threebody)** — the same
+  question with no spring: pure (softened) inverse-square gravity toward three bodies plus
+  linear drag, so every release decays onto one of them. Same engine as the pendulum
+  (Web Workers, progressive anti-aliasing, zoom/pan, trajectory tracing).
 
 ## Adding a demo
 

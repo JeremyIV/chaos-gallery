@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Magnetic pendulum — basin fractal</title>
-<meta name="description" content="A deterministic pendulum over three magnets: every pixel is a release point, colored by which magnet finally captures it. The basin boundaries are fractal — scroll to zoom.">
-<link rel="canonical" href="https://jeremyiv.github.io/chaos-gallery/pendulum/">
+<title>Decaying orbits — three-body basin fractal</title>
+<meta name="description" content="Pure inverse-square gravity toward three bodies plus a little drag: every pixel is a release point, colored by the body its decaying orbit finally lands on.">
+<link rel="canonical" href="https://jeremyiv.github.io/chaos-gallery/threebody/">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='9' r='6' fill='%232E7DFF'/><circle cx='9' cy='21' r='6' fill='%23FFB300'/><circle cx='23' cy='21' r='6' fill='%23E5195E'/></svg>">
 <style>
   :root { color-scheme: dark; }
@@ -32,9 +32,9 @@
     <canvas id="overlay"></canvas>
   </div>
   <div id="controls">
-    <label for="fric">Friction</label>
-    <input type="range" id="fric" min="0.06" max="0.45" step="0.01" value="0.15">
-    <span id="fricOut">0.15</span>
+    <label for="fric">Drag</label>
+    <input type="range" id="fric" min="0.01" max="0.3" step="0.01" value="0.06">
+    <span id="fricOut">0.06</span>
     <button id="reset">Reset view</button>
     <span id="zoom"></span>
     <span id="status"></span>
@@ -44,11 +44,11 @@
 "use strict";
 const P = {
   MAGS: [[0, 1], [-0.866, -0.5], [0.866, -0.5]],
-  SPRING: 0.5, HH: 0.1225, DT: 0.02,
+  SPRING: 0, HH: 0.05, DT: 0.012,
   COLORS: ["#2E7DFF", "#FFB300", "#E5195E"],
 };
 const MAGCOL = P.COLORS;
-const HW0 = 4.8, MIN_HW = HW0 / 100000, MAX_HW = 64;
+const HW0 = 4.8, MIN_HW = HW0 / 100000, MAX_HW = 24;
 
 function makeSettle(P) {
   const MAGS = P.MAGS, SPRING = P.SPRING, HH = P.HH, DT = P.DT;
@@ -118,7 +118,7 @@ const slider = document.getElementById("fric"), fricOut = document.getElementByI
 const settleMain = makeSettle(P);
 
 let view = { cx: 0, cy: 0, hw: HW0 };
-let fric = 0.15, maxSteps = 3500;
+let fric = 0.06, maxSteps = 10000;
 let RW = 480, RH = 360, cssW = 0, cssH = 0;
 let gen = 0, queue = [], chunksTotal = 0, chunksDone = 0, fineApplied = new Uint8Array(0);
 let sums = new Float32Array(0), rowSamples = new Uint16Array(0), coarseChunks = 0, fineChunksPerPass = 0;
@@ -132,7 +132,7 @@ function halton(i, b) {
 const pointers = new Map();
 
 const vh = () => view.hw * 0.75;
-const calcMaxSteps = () => Math.min(20000, Math.round(3500 * (1 + 0.5 * Math.abs(Math.log2(HW0 / view.hw)))));
+const calcMaxSteps = () => Math.min(40000, Math.round(10000 * (1 + 0.5 * Math.abs(Math.log2(HW0 / view.hw)))));
 
 function sizeCanvases() {
   const rect = stage.getBoundingClientRect();

@@ -38,7 +38,9 @@ const DEMOS = [
   { id: "plinko", title: "Plinko fractal", src: "plinko/",
     blurb: "Every pixel is a drop point, colored by where the ball finally lands. Scroll to zoom (up to 100,000×) — the basin boundaries are fractal. Hover to trace a trajectory." },
   { id: "pendulum", title: "Magnetic pendulum", src: "pendulum/",
-    blurb: "Every pixel is a release point, colored by which of three magnets captures the pendulum. Scroll to zoom, drag to pan, hover to trace, click to pin — and try shading by capture time." },
+    blurb: "Every pixel is a release point, colored by which of three magnets captures the pendulum. Scroll to zoom (out is where the good stuff is), drag to pan, hover to trace, click to pin." },
+  { id: "threebody", title: "Three-body decay", src: "threebody/",
+    blurb: "No spring this time — pure inverse-square gravity toward three bodies, plus a little drag. Every pixel is a release point, colored by the body its decaying orbit finally lands on." },
 ];
 const tabs = document.getElementById("tabs");
 const blurb = document.getElementById("blurb");
