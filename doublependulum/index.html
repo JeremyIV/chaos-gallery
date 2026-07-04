@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Double pendulum — flip fractal</title>
+<meta name="description" content="A double pendulum released at rest from every pixel's pose, colored by which arm flips over the top first and how long it takes. A million simulations integrated live on the GPU — hover to watch any one of them.">
+<link rel="canonical" href="https://jeremyiv.github.io/chaos-gallery/doublependulum/">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='9' r='6' fill='%232E7DFF'/><circle cx='9' cy='21' r='6' fill='%23FFB300'/><circle cx='23' cy='21' r='6' fill='%23E5195E'/></svg>">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #101014; color: #e8e8ee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+  main { width: min(960px, 100%); padding: 16px; }
+  #stage { position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: #17171c; touch-action: none; }
+  #basin, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #overlay { cursor: crosshair; }
+  #nogl { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 24px; color: #9a9aa8; font-size: 14px; }
+  #controls { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; font-size: 13px; }
+  .key { color: #9a9aa8; display: inline-flex; align-items: center; gap: 5px; }
+  .key i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  button { background: #22222b; color: #e8e8ee; border: 1px solid #3a3a46; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  button:hover { background: #2a2a35; }
+  #zoom { color: #9a9aa8; font-variant-numeric: tabular-nums; }
+  #status { color: #7c7c8a; font-size: 13px; min-width: 96px; text-align: right; margin-left: auto; font-variant-numeric: tabular-nums; }
+  #hint { color: #7c7c8a; font-size: 13px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <div id="stage">
+    <canvas id="basin"></canvas>
+    <canvas id="overlay"></canvas>
+    <div id="nogl">This demo needs WebGL2 with float render targets &mdash; try a recent Chrome, Firefox, or Safari 16+.</div>
+  </div>
+  <div id="controls">
+    <span class="key"><i style="background:#2E7DFF"></i>lower arm flips &#8634;</span>
+    <span class="key"><i style="background:#E5195E"></i>lower &#8635;</span>
+    <span class="key"><i style="background:#FFB300"></i>upper &#8634;</span>
+    <span class="key"><i style="background:#21C08B"></i>upper &#8635;</span>
+    <span class="key"><i style="background:#120f1e;border:1px solid #3a3a46"></i>never &mdash; too little energy</span>
+    <span class="key"><i style="background:#1b1b20;border:1px solid #3a3a46"></i>no flip by t&nbsp;256</span>
+    <button id="reset">Reset view</button>
+    <span id="zoom"></span>
+    <span id="status"></span>
+  </div>
+  <p id="hint">Brighter = flips sooner. The flat dark island can <em>never</em> flip &mdash; not enough energy. Hover to watch that pendulum; its track through angle-space escapes the tile at the moment of the flip. Click to pin, scroll to zoom.</p>
+</main>
+<script>
+"use strict";
+const TAU = Math.PI * 2;
+const DT = 1 / 256, TMAX = 256, TRACE_TMAX = 256; // trace horizon must match the image's, or hover contradicts the pixel
+const HW0 = 4.2, MIN_HW = HW0 / 30000, MAX_HW = 16;
+const PLAY = 2.2, HOLD = 0.9; // replay: sim time-units per second; end-hold seconds
+const CLS_COLORS = ["#2E7DFF", "#E5195E", "#FFB300", "#21C08B"]; // lower ccw, lower cw, upper ccw, upper cw
+const NEVER_COLOR = "#1b1b20", FORBIDDEN_COLOR = "#120f1e";
+
+const stage = document.getElementById("stage");
+const basin = document.getElementById("basin");
+const overlay = document.getElementById("overlay"), octx = overlay.getContext("2d");
+const statusEl = document.getElementById("status"), zoomEl = document.getElementById("zoom");
+
+// ---------- shared physics: equal masses, equal lengths, g = 1 ----------
+// state s = (th1, w1, th2, w2); a "flip" is an arm crossing the upward vertical,
+// i.e. its unwrapped angle crossing an odd multiple of pi.
+function derivJS(s, d) {
+  const dd = s[0] - s[2], sd = Math.sin(dd), cd = Math.cos(dd);
+  const den = 2 + 2 * sd * sd;
+  d[0] = s[1];
+  d[1] = (-3 * Math.sin(s[0]) - Math.sin(s[0] - 2 * s[2]) - 2 * sd * (s[3] * s[3] + s[1] * s[1] * cd)) / den;
+  d[2] = s[3];
+  d[3] = (2 * sd * (2 * s[1] * s[1] + 2 * Math.cos(s[0]) + s[3] * s[3] * cd)) / den;
+}
+const cellOf = th => Math.floor((th + Math.PI) / TAU);
+
+// CPU trace for hover/pin: integrate past the flip so the path visibly leaves the tile.
+const _k1 = new Float64Array(4), _k2 = new Float64Array(4), _k3 = new Float64Array(4), _k4 = new Float64Array(4), _tmp = new Float64Array(4);
+const TRACE_SAMPLE = 4;
+const TRACE_BUF = new Float64Array(2 * (Math.round(TRACE_TMAX / DT) / TRACE_SAMPLE + 2));
+function computeTrace(th1, th2) {
+  const s = new Float64Array([th1, 0, th2, 0]);
+  const dts = DT * TRACE_SAMPLE;
+  const pts = TRACE_BUF;
+  pts[0] = th1; pts[1] = th2;
+  let n = 2;
+  let c1 = cellOf(th1), c2 = cellOf(th2);
+  let flipT = -1, cls = -1;
+  const maxSteps = Math.round(TRACE_TMAX / DT);
+  for (let i = 1; i <= maxSteps; i++) {
+    derivJS(s, _k1);
+    for (let j = 0; j < 4; j++) _tmp[j] = s[j] + 0.5 * DT * _k1[j];
+    derivJS(_tmp, _k2);
+    for (let j = 0; j < 4; j++) _tmp[j] = s[j] + 0.5 * DT * _k2[j];
+    derivJS(_tmp, _k3);
+    for (let j = 0; j < 4; j++) _tmp[j] = s[j] + DT * _k3[j];
+    derivJS(_tmp, _k4);
+    for (let j = 0; j < 4; j++) s[j] += DT / 6 * (_k1[j] + 2 * _k2[j] + 2 * _k3[j] + _k4[j]);
+    if (i % TRACE_SAMPLE === 0) { pts[n++] = s[0]; pts[n++] = s[2]; }
+    if (flipT < 0) {
+      const n1 = cellOf(s[0]), n2 = cellOf(s[2]);
+      if (n2 !== c2) { flipT = i * DT; cls = n2 > c2 ? 0 : 1; }
+      else if (n1 !== c1) { flipT = i * DT; cls = n1 > c1 ? 2 : 3; }
+      c1 = n1; c2 = n2;
+    } else if (i * DT > flipT + 4) break; // keep going a bit past the flip so the path visibly leaves the tile
+  }
+  const dur = flipT >= 0 ? Math.min(flipT + 2.5, (n / 2 - 1) * dts) : 24;
+  return { x: th1, y: th2, pts: pts, n: n, dts: dts, flipT: flipT, cls: cls, dur: dur };
+}
+
+// ---------- WebGL: one RK4 double pendulum per pixel, integrated across frames ----------
+const VS = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const INIT_FS = `#version 300 es
+precision highp float;
+uniform vec2 uRes;
+uniform vec3 uView; // cx, cy, hw
+layout(location=0) out vec4 oState;
+layout(location=1) out vec4 oResult;
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  float hw = uView.z, hh = hw * 0.75;
+  float th1 = uView.x + (uv.x - 0.5) * 2.0 * hw;
+  float th2 = uView.y + (uv.y - 0.5) * 2.0 * hh;
+  oState = vec4(th1, 0.0, th2, 0.0);
+  // released at rest: if E0 is below the lowest flipped configuration, no flip is ever possible
+  bool forbidden = 2.0 * cos(th1) + cos(th2) > 1.0;
+  oResult = forbidden ? vec4(-1.0, -2.0, 1.0, 0.0) : vec4(-1.0, -1.0, 0.0, 0.0);
+}`;
+const STEP_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uState;
+uniform sampler2D uResult;
+uniform float uT0, uDt;
+uniform int uSteps;
+layout(location=0) out vec4 oState;
+layout(location=1) out vec4 oResult;
+const float PI = 3.14159265358979, TAU = 6.28318530717959;
+vec4 deriv(vec4 s) {
+  float dd = s.x - s.z, sd = sin(dd), cd = cos(dd);
+  float den = 2.0 + 2.0 * sd * sd;
+  return vec4(
+    s.y,
+    (-3.0 * sin(s.x) - sin(s.x - 2.0 * s.z) - 2.0 * sd * (s.w * s.w + s.y * s.y * cd)) / den,
+    s.w,
+    (2.0 * sd * (2.0 * s.y * s.y + 2.0 * cos(s.x) + s.w * s.w * cd)) / den);
+}
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec4 s = texelFetch(uState, px, 0);
+  vec4 r = texelFetch(uResult, px, 0);
+  if (r.z < 0.5) {
+    float c1 = floor((s.x + PI) / TAU), c2 = floor((s.z + PI) / TAU);
+    float t = uT0;
+    for (int i = 0; i < uSteps; i++) {
+      vec4 a = deriv(s);
+      vec4 b = deriv(s + 0.5 * uDt * a);
+      vec4 c = deriv(s + 0.5 * uDt * b);
+      vec4 d = deriv(s + uDt * c);
+      s += uDt / 6.0 * (a + 2.0 * b + 2.0 * c + d);
+      t += uDt;
+      float n1 = floor((s.x + PI) / TAU), n2 = floor((s.z + PI) / TAU);
+      if (n2 != c2) { r = vec4(t, n2 > c2 ? 0.0 : 1.0, 1.0, 0.0); break; }
+      if (n1 != c1) { r = vec4(t, n1 > c1 ? 2.0 : 3.0, 1.0, 0.0); break; }
+    }
+  }
+  oState = s;
+  oResult = r;
+}`;
+const SHOW_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uResult;
+uniform vec2 uRes;
+uniform vec4 uRemap; // maps display uv -> sim-result uv while a gesture is in flight
+uniform float uLo, uHi; // log(1+t) range of the current view, adapted from readback stats
+uniform vec3 uCols[6]; // 4 flip classes, never, forbidden
+out vec4 o;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+void main() {
+  vec2 tuv = (gl_FragCoord.xy / uRes) * uRemap.xy + uRemap.zw;
+  vec3 c;
+  if (any(lessThan(tuv, vec2(0.0))) || any(greaterThan(tuv, vec2(1.0)))) {
+    o = vec4(uCols[4], 1.0);
+    return;
+  }
+  vec4 r = texture(uResult, tuv);
+  if (r.y < -1.5) c = uCols[5];
+  else if (r.y < -0.5) c = uCols[4];
+  else {
+    float u = clamp((log(1.0 + r.x) - uLo) / (uHi - uLo), 0.0, 1.0);
+    float v = 0.10 + 1.02 * pow(1.0 - u, 1.35);
+    v *= 1.0 + 0.13 * sin(44.0 * u); // iso-flip-time contour bands
+    vec3 base = uCols[int(r.y + 0.5)];
+    c = base * v + vec3(1.0) * 0.25 * pow(1.0 - u, 7.0);
+  }
+  c += (hash(gl_FragCoord.xy) - 0.5) / 255.0;
+  o = vec4(c, 1.0);
+}`;
+const STATS_FS = `#version 300 es
+precision highp float;
+uniform sampler2D uResult;
+uniform vec2 uScale; // full-res texels per stats texel
+out vec4 o;
+void main() {
+  o = texelFetch(uResult, ivec2(gl_FragCoord.xy * uScale), 0);
+}`;
+
+let gl = null, glLost = false;
+let progInit = null, progStep = null, progShow = null, progStats = null, vao = null;
+let targets = null; // two {state, result, fbo}
+let statsTex = null, statsFbo = null;
+const SW = 96, SH = 72;
+const LO0 = Math.log(2.2), HI0 = Math.log(1 + TMAX);
+let logLo = LO0, logHi = HI0, tgtLo = LO0, tgtHi = HI0;
+let srcIdx = 0;
+let RW = 480, RH = 360, cssW = 0, cssH = 0;
+let view = { cx: 0, cy: 0, hw: HW0 };
+let simView = null; // the view the sim textures were seeded with (display reprojects until restart)
+let simT = 0, K = 96, viewDirty = true, needsShow = false, stepCount = 0;
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+function makeProg(fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+function hex2vec(h) { return [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255]; }
+
+function initGL() {
+  try {
+    gl = basin.getContext("webgl2", { antialias: false, depth: false, stencil: false, alpha: false });
+    if (!gl || !gl.getExtension("EXT_color_buffer_float")) throw new Error("WebGL2 float rendering unavailable");
+    progInit = makeProg(INIT_FS);
+    progStep = makeProg(STEP_FS);
+    progShow = makeProg(SHOW_FS);
+    progStats = makeProg(STATS_FS);
+    vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.useProgram(progStep);
+    gl.uniform1i(gl.getUniformLocation(progStep, "uState"), 0);
+    gl.uniform1i(gl.getUniformLocation(progStep, "uResult"), 1);
+    gl.uniform1f(gl.getUniformLocation(progStep, "uDt"), DT);
+    gl.useProgram(progStats);
+    gl.uniform1i(gl.getUniformLocation(progStats, "uResult"), 0);
+    gl.useProgram(progShow);
+    gl.uniform1i(gl.getUniformLocation(progShow, "uResult"), 0);
+    const cols = [];
+    for (const h of CLS_COLORS.concat([NEVER_COLOR, FORBIDDEN_COLOR])) cols.push(...hex2vec(h));
+    gl.uniform3fv(gl.getUniformLocation(progShow, "uCols"), cols);
+    targets = null;
+    statsTex = null; // context loss invalidates these; recreate in allocTargets
+    statsFbo = null;
+    return true;
+  } catch (err) {
+    gl = null;
+    document.getElementById("nogl").style.display = "flex";
+    return false;
+  }
+}
+function makeTex(w, h) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function allocTargets() {
+  if (targets) for (const tg of targets) { gl.deleteTexture(tg.state); gl.deleteTexture(tg.result); gl.deleteFramebuffer(tg.fbo); }
+  targets = [];
+  for (let i = 0; i < 2; i++) {
+    const state = makeTex(RW, RH), result = makeTex(RW, RH);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, state, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, result, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    targets.push({ state: state, result: result, fbo: fbo });
+  }
+  if (!statsTex) {
+    statsTex = makeTex(SW, SH);
+    statsFbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, statsFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, statsTex, 0);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+const statsBuf = new Float32Array(SW * SH * 4);
+function updateStats() {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, statsFbo);
+  gl.viewport(0, 0, SW, SH);
+  gl.useProgram(progStats);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, targets[srcIdx].result);
+  gl.uniform2f(gl.getUniformLocation(progStats, "uScale"), RW / SW, RH / SH);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.readPixels(0, 0, SW, SH, gl.RGBA, gl.FLOAT, statsBuf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const ts = [];
+  for (let i = 0; i < SW * SH; i++) if (statsBuf[i * 4 + 1] > -0.5) ts.push(statsBuf[i * 4]);
+  if (ts.length < 60) return; // too few flips in view to normalize against
+  ts.sort((a, b) => a - b);
+  const lo = ts[Math.floor(ts.length * 0.03)], hi = ts[Math.floor(ts.length * 0.97)];
+  tgtLo = Math.log(1 + Math.max(0.4, lo * 0.8));
+  tgtHi = Math.max(Math.log(1 + hi), tgtLo + 0.7);
+}
+function runInit() {
+  srcIdx = 0;
+  simT = 0;
+  simView = { cx: view.cx, cy: view.cy, hw: view.hw };
+  gl.bindFramebuffer(gl.FRAMEBUFFER, targets[0].fbo);
+  gl.viewport(0, 0, RW, RH);
+  gl.useProgram(progInit);
+  gl.uniform2f(gl.getUniformLocation(progInit, "uRes"), RW, RH);
+  gl.uniform3f(gl.getUniformLocation(progInit, "uView"), view.cx, view.cy, view.hw);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+function stepSim() {
+  const steps = Math.min(K, Math.max(1, Math.round((TMAX - simT) / DT)));
+  const src = targets[srcIdx], dst = targets[1 - srcIdx];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+  gl.viewport(0, 0, RW, RH);
+  gl.useProgram(progStep);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, src.state);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, src.result);
+  gl.uniform1f(gl.getUniformLocation(progStep, "uT0"), simT);
+  gl.uniform1i(gl.getUniformLocation(progStep, "uSteps"), steps);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  srcIdx = 1 - srcIdx;
+  simT += steps * DT;
+}
+function drawShow() {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, RW, RH);
+  gl.useProgram(progShow);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, targets[srcIdx].result);
+  const s = simView ? view.hw / simView.hw : 1;
+  const zx = simView ? 0.5 * (1 - s) + (view.cx - simView.cx) / (2 * simView.hw) : 0;
+  const zy = simView ? 0.5 * (1 - s) + (view.cy - simView.cy) / (2 * simView.hw * 0.75) : 0;
+  gl.uniform2f(gl.getUniformLocation(progShow, "uRes"), RW, RH);
+  gl.uniform4f(gl.getUniformLocation(progShow, "uRemap"), s, s, zx, zy);
+  gl.uniform1f(gl.getUniformLocation(progShow, "uLo"), logLo);
+  gl.uniform1f(gl.getUniformLocation(progShow, "uHi"), logHi);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+basin.addEventListener("webglcontextlost", e => { e.preventDefault(); glLost = true; });
+basin.addEventListener("webglcontextrestored", () => {
+  glLost = false;
+  if (initGL()) { allocTargets(); viewDirty = true; ensureLoop(); }
+});
+
+// ---------- layout ----------
+function sizeCanvases() {
+  const rect = stage.getBoundingClientRect();
+  cssW = rect.width >= 2 ? rect.width : 928;
+  cssH = rect.height >= 2 ? rect.height : cssW * 0.75;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  RW = Math.max(160, Math.round(cssW * dpr));
+  RH = Math.round(RW * 0.75);
+  const budget = 1440000;
+  if (RW * RH > budget) {
+    const sc = Math.sqrt(budget / (RW * RH));
+    RW = Math.round(RW * sc); RH = Math.round(RW * 0.75);
+  }
+  basin.width = RW; basin.height = RH;
+  overlay.width = Math.round(cssW * (window.devicePixelRatio || 1));
+  overlay.height = Math.round(cssH * (window.devicePixelRatio || 1));
+  octx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+}
+
+// ---------- view mapping (matches other gallery demos) ----------
+const vh = () => view.hw * 0.75;
+const w2sx = wx => ((wx - view.cx) / (2 * view.hw) + 0.5) * cssW;
+const w2sy = wy => (0.5 - (wy - view.cy) / (2 * vh())) * cssH;
+function s2w(clientX, clientY) {
+  const rect = overlay.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return { x: view.cx, y: view.cy };
+  return {
+    x: view.cx + ((clientX - rect.left) / rect.width - 0.5) * 2 * view.hw,
+    y: view.cy + (0.5 - (clientY - rect.top) / rect.height) * 2 * vh(),
+  };
+}
+function anchor(w, clientX, clientY) {
+  const rect = overlay.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return;
+  const fx = (clientX - rect.left) / rect.width, fy = (clientY - rect.top) / rect.height;
+  view.cx = w.x - (fx - 0.5) * 2 * view.hw;
+  view.cy = w.y - (0.5 - fy) * 2 * vh();
+}
+
+// ---------- trace + overlay ----------
+let pinned = null, hoverPt = null, trace = null, tracePt = null, traceT0 = 0;
+let hideTraj = false, idleTimer = 0;
+let pathCache = { key: "", path: null };
+
+function activePt() { return pinned || hoverPt; }
+function syncTrace(now) {
+  const pt = activePt();
+  if (!pt) { trace = null; tracePt = null; return; }
+  if (tracePt && tracePt.x === pt.x && tracePt.y === pt.y) return;
+  const hadTrace = !!trace;
+  trace = computeTrace(pt.x, pt.y);
+  tracePt = pt;
+  if (!hadTrace) traceT0 = now;
+}
+function tracePath(tr) {
+  const key = tr.x + "," + tr.y + "," + tr.n + "," + view.cx + "," + view.cy + "," + view.hw + "," + cssW + "," + cssH;
+  if (pathCache.key === key) return pathCache.path;
+  const wp = new Path2D();
+  wp.moveTo(tr.pts[0], tr.pts[1]);
+  for (let i = 2; i < tr.n; i += 2) wp.lineTo(tr.pts[i], tr.pts[i + 1]);
+  const ax = cssW / (2 * view.hw), ay = -cssH / (2 * vh());
+  const p = new Path2D();
+  p.addPath(wp, new DOMMatrix([ax, 0, 0, ay, cssW / 2 - view.cx * ax, cssH / 2 - view.cy * ay]));
+  pathCache = { key: key, path: p };
+  return p;
+}
+
+function drawOverlay(now) {
+  octx.clearRect(0, 0, cssW, cssH);
+  // tile boundaries: odd multiples of pi — crossing one IS a flip
+  octx.strokeStyle = "rgba(255,255,255,0.09)";
+  octx.lineWidth = 1;
+  const kx0 = Math.ceil(((view.cx - view.hw) / Math.PI - 1) / 2), kx1 = Math.floor(((view.cx + view.hw) / Math.PI - 1) / 2);
+  const ky0 = Math.ceil(((view.cy - vh()) / Math.PI - 1) / 2), ky1 = Math.floor(((view.cy + vh()) / Math.PI - 1) / 2);
+  for (let k = kx0; k <= kx1; k++) {
+    const sx = w2sx((2 * k + 1) * Math.PI);
+    octx.beginPath(); octx.moveTo(sx, 0); octx.lineTo(sx, cssH); octx.stroke();
+  }
+  for (let k = ky0; k <= ky1; k++) {
+    const sy = w2sy((2 * k + 1) * Math.PI);
+    octx.beginPath(); octx.moveTo(0, sy); octx.lineTo(cssW, sy); octx.stroke();
+  }
+  if (hideTraj || !trace) return;
+  const tr = trace;
+  const pts = tr.pts;
+  // config-space path, dark halo then bright core
+  const tp = tracePath(tr);
+  octx.lineJoin = "round";
+  for (const pass of [["rgba(0,0,0,0.55)", 3.5], ["rgba(255,255,255,0.85)", 1.5]]) {
+    octx.strokeStyle = pass[0]; octx.lineWidth = pass[1];
+    octx.stroke(tp);
+  }
+  // release point
+  octx.beginPath(); octx.arc(w2sx(tr.x), w2sy(tr.y), 5, 0, TAU);
+  octx.fillStyle = "#fff"; octx.fill();
+  octx.lineWidth = 2.5; octx.strokeStyle = tr.cls >= 0 ? CLS_COLORS[tr.cls] : "#555"; octx.stroke();
+  // flip point on the path
+  if (tr.flipT >= 0) {
+    const fi = 2 * Math.min(Math.round(tr.flipT / tr.dts), tr.n / 2 - 1);
+    octx.beginPath(); octx.arc(w2sx(pts[fi]), w2sy(pts[fi + 1]), 4, 0, TAU);
+    octx.fillStyle = CLS_COLORS[tr.cls]; octx.fill();
+    octx.lineWidth = 1.5; octx.strokeStyle = "#fff"; octx.stroke();
+  }
+  // replay clock, shared by the config-space dot and the inset pendulum
+  const cycle = tr.dur / PLAY + HOLD;
+  const replayT = Math.min(Math.max(0, ((now - traceT0) / 1000) % cycle) * PLAY, tr.dur);
+  const idx = 2 * Math.min(Math.round(replayT / tr.dts), tr.n / 2 - 1);
+  const a1 = pts[idx], a2 = pts[idx + 1];
+  octx.beginPath(); octx.arc(w2sx(a1), w2sy(a2), 4.5, 0, TAU);
+  octx.fillStyle = "#fff"; octx.fill();
+  octx.lineWidth = 2; octx.strokeStyle = "rgba(0,0,0,0.6)"; octx.stroke();
+  drawInset(tr, replayT, a1, a2);
+}
+function drawInset(tr, replayT, a1, a2) {
+  const iw = 176, ih = 176, ix = cssW - iw - 12, iy = 12;
+  if (cssW < 360) return;
+  const px = ix + iw / 2, py = iy + ih / 2 - 12, R = 36;
+  octx.save();
+  octx.beginPath(); octx.roundRect(ix, iy, iw, ih, 8);
+  octx.fillStyle = "rgba(16,16,20,0.88)"; octx.fill();
+  octx.strokeStyle = "rgba(255,255,255,0.3)"; octx.lineWidth = 1; octx.stroke();
+  octx.clip();
+  // trail of the lower bob over the last 1.5 time-units
+  const pts = tr.pts;
+  const iNow = Math.min(Math.round(replayT / tr.dts), tr.n / 2 - 1);
+  const i0 = Math.max(0, iNow - Math.round(1.5 / tr.dts));
+  octx.beginPath();
+  for (let i = i0; i <= iNow; i++) {
+    const t1 = pts[2 * i], t2 = pts[2 * i + 1];
+    const bx = px + R * Math.sin(t1) + R * Math.sin(t2);
+    const by = py + R * Math.cos(t1) + R * Math.cos(t2);
+    if (i === i0) octx.moveTo(bx, by); else octx.lineTo(bx, by);
+  }
+  octx.strokeStyle = "rgba(255,255,255,0.28)"; octx.lineWidth = 1.2; octx.stroke();
+  // arms
+  const b1x = px + R * Math.sin(a1), b1y = py + R * Math.cos(a1);
+  const b2x = b1x + R * Math.sin(a2), b2y = b1y + R * Math.cos(a2);
+  octx.beginPath(); octx.moveTo(px, py); octx.lineTo(b1x, b1y); octx.lineTo(b2x, b2y);
+  octx.strokeStyle = "rgba(255,255,255,0.9)"; octx.lineWidth = 2; octx.lineJoin = "round"; octx.stroke();
+  octx.beginPath(); octx.arc(px, py, 2.5, 0, TAU); octx.fillStyle = "#9a9aa8"; octx.fill();
+  octx.beginPath(); octx.arc(b1x, b1y, 4, 0, TAU); octx.fillStyle = "#FFB300"; octx.fill();
+  octx.beginPath(); octx.arc(b2x, b2y, 5, 0, TAU); octx.fillStyle = "#2E7DFF"; octx.fill();
+  // flash at the flip
+  if (tr.flipT >= 0 && replayT >= tr.flipT && replayT < tr.flipT + 0.8) {
+    const f = (replayT - tr.flipT) / 0.8;
+    const fx = tr.cls < 2 ? b2x : b1x, fy = tr.cls < 2 ? b2y : b1y;
+    octx.beginPath(); octx.arc(fx, fy, 6 + f * 16, 0, TAU);
+    octx.strokeStyle = CLS_COLORS[tr.cls]; octx.globalAlpha = 1 - f; octx.lineWidth = 2.5; octx.stroke();
+    octx.globalAlpha = 1;
+  }
+  octx.fillStyle = "#9a9aa8"; octx.font = "11px system-ui, sans-serif";
+  octx.fillText("t " + replayT.toFixed(1), ix + 10, iy + ih - 10);
+  const label = tr.flipT >= 0 ? "flips at t " + tr.flipT.toFixed(1) : "no flip by t " + TRACE_TMAX;
+  octx.fillText(label, ix + 10, iy + ih - 24);
+  octx.restore();
+}
+
+// ---------- main loop ----------
+let rafId = 0, lastFrame = 0, lastStatusT = -1;
+function ensureLoop() { if (!rafId && gl) rafId = requestAnimationFrame(frame); }
+function frame(now) {
+  rafId = 0;
+  if (glLost) return;
+  if (viewDirty) { viewDirty = false; runInit(); }
+  let stepped = false;
+  if (simT < TMAX) {
+    if (lastFrame) {
+      const dt = now - lastFrame;
+      if (dt > 26) K = Math.max(24, Math.floor(K * 0.75));
+      else if (dt < 15) K = Math.min(768, Math.floor(K * 1.25) + 1);
+    }
+    lastFrame = now;
+    // readback BEFORE the step pass (previous frame's result has long completed, so the
+    // stall is minimal), and drop the next dt sample so the K controller doesn't see it
+    if (++stepCount % 12 === 0 && simT > 0) { updateStats(); lastFrame = 0; }
+    stepSim();
+    if (simT >= TMAX) updateStats(); // final exact range once fully developed
+    stepped = true;
+  } else lastFrame = 0;
+  const settling = Math.abs(logLo - tgtLo) + Math.abs(logHi - tgtHi) > 0.0015;
+  if (settling) { logLo += (tgtLo - logLo) * 0.15; logHi += (tgtHi - logHi) * 0.15; }
+  if (stepped || settling || needsShow) { drawShow(); needsShow = false; }
+  const st = simT < TMAX ? Math.floor(simT) : -1;
+  if (st !== lastStatusT) {
+    lastStatusT = st;
+    statusEl.textContent = st >= 0 ? "t = " + st + " / " + TMAX : "";
+  }
+  syncTrace(now);
+  drawOverlay(now);
+  if (simT < TMAX || settling || activePt()) rafId = requestAnimationFrame(frame);
+}
+
+function interact() {
+  needsShow = true; // reproject the existing result under the gesture; restart integration on idle
+  hideTraj = true;
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    hideTraj = false;
+    if (!simView || simView.cx !== view.cx || simView.cy !== view.cy || simView.hw !== view.hw) viewDirty = true;
+    ensureLoop();
+  }, 250);
+  const z = HW0 / view.hw;
+  zoomEl.textContent = z >= 1.05 ? "×" + (z >= 100 ? Math.round(z).toLocaleString("en-US") : z >= 10 ? z.toFixed(0) : z.toFixed(1))
+    : z <= 0.95 ? "×" + z.toFixed(2) : "";
+  ensureLoop();
+}
+
+// ---------- input (same gestures as the other demos) ----------
+const pointers = new Map();
+let dragInfo = null, pinch = null;
+function rebaseline() {
+  if (pointers.size < 2) pinch = null;
+  if (pointers.size === 2) {
+    dragInfo = null;
+    const pts = [...pointers.values()];
+    pinch = {
+      d0: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y), hw0: view.hw,
+      wmid: s2w((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2),
+    };
+  } else if (pointers.size === 1 && !dragInfo) {
+    const p = [...pointers.values()][0];
+    dragInfo = { sx: p.x, sy: p.y, cx0: view.cx, cy0: view.cy, moved: true };
+  }
+}
+overlay.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  try { overlay.setPointerCapture(e.pointerId); } catch (err) {}
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1) {
+    dragInfo = { sx: e.clientX, sy: e.clientY, cx0: view.cx, cy0: view.cy, moved: false };
+  } else {
+    rebaseline();
+  }
+});
+overlay.addEventListener("pointermove", e => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pointers.size === 2) {
+    const pts = [...pointers.values()];
+    const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    if (d > 4 && pinch.d0 > 4) {
+      view.hw = Math.min(MAX_HW, Math.max(MIN_HW, pinch.hw0 * pinch.d0 / d));
+      anchor(pinch.wmid, (pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2);
+      interact();
+    }
+  } else if (dragInfo && pointers.size === 1) {
+    const dx = e.clientX - dragInfo.sx, dy = e.clientY - dragInfo.sy;
+    if (Math.abs(dx) + Math.abs(dy) > 4) dragInfo.moved = true;
+    if (dragInfo.moved) {
+      const rect = overlay.getBoundingClientRect();
+      if (rect.width >= 2 && rect.height >= 2) {
+        view.cx = dragInfo.cx0 - dx / rect.width * 2 * view.hw;
+        view.cy = dragInfo.cy0 + dy / rect.height * 2 * vh();
+        interact();
+      }
+    }
+  } else if (pointers.size === 0 && e.pointerType === "mouse" && !pinned) {
+    hoverPt = s2w(e.clientX, e.clientY);
+    ensureLoop();
+  }
+});
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  const wasClick = dragInfo && !dragInfo.moved && pointers.size === 0;
+  rebaseline();
+  if (pointers.size === 0) {
+    if (wasClick) {
+      pinned = pinned ? null : s2w(e.clientX, e.clientY);
+      if (!pinned) hoverPt = null;
+      ensureLoop();
+    }
+    dragInfo = null;
+  }
+}
+overlay.addEventListener("pointerup", endPointer);
+overlay.addEventListener("pointercancel", e => {
+  pointers.delete(e.pointerId);
+  rebaseline();
+  if (pointers.size === 0) dragInfo = null;
+});
+overlay.addEventListener("pointerleave", () => {
+  if (pointers.size === 0 && !pinned) { hoverPt = null; octx.clearRect(0, 0, cssW, cssH); ensureLoop(); }
+});
+stage.addEventListener("wheel", e => {
+  e.preventDefault();
+  const w = s2w(e.clientX, e.clientY);
+  view.hw = Math.min(MAX_HW, Math.max(MIN_HW, view.hw * Math.exp(e.deltaY * 0.0015)));
+  anchor(w, e.clientX, e.clientY);
+  interact();
+}, { passive: false });
+
+document.getElementById("reset").addEventListener("click", () => {
+  view = { cx: 0, cy: 0, hw: HW0 };
+  pinned = null;
+  interact();
+});
+let resizeTimer = 0;
+function onStageResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const rect = stage.getBoundingClientRect();
+    if (rect.width < 2) return;
+    if (Math.abs(rect.width - cssW) < 1 && Math.abs(rect.height - cssH) < 1) return;
+    sizeCanvases();
+    if (gl) { allocTargets(); viewDirty = true; ensureLoop(); }
+  }, 150);
+}
+new ResizeObserver(onStageResize).observe(stage);
+addEventListener("resize", onStageResize);
+
+sizeCanvases();
+if (initGL()) {
+  allocTargets();
+  ensureLoop();
+}
+</script>
+</body>
+</html>

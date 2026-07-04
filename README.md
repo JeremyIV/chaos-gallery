@@ -23,6 +23,14 @@ fractal, and you can zoom in more or less forever.
   question with no spring: pure (softened) inverse-square gravity toward three bodies plus
   linear drag, so every release decays onto one of them. Same engine as the pendulum
   (Web Workers, progressive anti-aliasing, zoom/pan, trajectory tracing).
+- **[Double pendulum](https://jeremyiv.github.io/chaos-gallery/#doublependulum)** — every
+  pixel is a starting pose (the two arm angles), released at rest and colored by which arm
+  flips over the top first (hue) and how long it takes (brightness). The whole image is
+  up to ~1.4 million simultaneous RK4 integrations running in a WebGL fragment shader, so the
+  fractal develops live and re-develops on every zoom. The flat central island can *never*
+  flip — its energy is provably too low — and a flip is literally the trajectory crossing a
+  tile edge in angle-space: hover any pixel to watch its pendulum swing while its track
+  wanders the fractal and escapes the tile at the moment of the flip.
 
 ## Adding a demo
 
